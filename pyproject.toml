@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uagents-trace"
+version = "0.1.0"
+description = "Drop-in, read-only observability for uAgents message flow"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "uagents>=0.22",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "aiosqlite>=0.20",
+    "rich>=13.0",
+    "textual>=0.50",
+]
+
+[project.scripts]
+uagents-trace = "uagents_trace.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["uagents_trace*"]
+
+[tool.setuptools.package-data]
+uagents_trace = ["ui/*.html"]
