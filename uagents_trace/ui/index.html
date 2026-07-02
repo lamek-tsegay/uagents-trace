@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>uagents-trace</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161922;
+    --panel-2: #1d2230;
+    --border: #2a2f3d;
+    --text: #e4e6ec;
+    --muted: #8a90a3;
+    --green: #3ecf71;
+    --amber: #e8a23d;
+    --red: #e8484c;
+    --grey: #5b6172;
+    --accent: #5b8cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+  }
+  #app {
+    display: grid;
+    grid-template-columns: 340px 1fr;
+    height: 100vh;
+  }
+  aside#trace-list {
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+  }
+  aside#trace-list h1 {
+    font-size: 15px;
+    margin: 0;
+    padding: 16px 16px 10px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  aside#trace-list h1 .live-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+    animation: pulse 1.6s infinite ease-in-out;
+  }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+  .sidebar-help {
+    padding: 0 16px 14px;
+    font-size: 11.5px;
+    color: var(--muted);
+    line-height: 1.5;
+    border-bottom: 1px solid var(--border);
+  }
+  #traces { flex: 1; overflow-y: auto; }
+  #traces .empty {
+    padding: 20px 16px;
+    color: var(--muted);
+    font-size: 12.5px;
+    line-height: 1.6;
+  }
+  .trace-item {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+  }
+  .trace-item:hover { background: var(--panel-2); }
+  .trace-item.selected { background: var(--panel-2); border-left: 3px solid var(--accent); }
+  .trace-item .participants {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+  .trace-item .ptypes {
+    font-size: 11px;
+    color: var(--muted);
+    margin: 5px 0;
+  }
+  .trace-item .tid {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 10px;
+    color: #545a6b;
+    margin-top: 5px;
+  }
+  .trace-item .meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 4px;
+  }
+  .trace-item .time { font-size: 12px; color: var(--muted); }
+  .badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 10px;
+    letter-spacing: .02em;
+  }
+  .badge.ok { background: rgba(62,207,113,.15); color: var(--green); }
+  .badge.fail { background: rgba(232,72,76,.18); color: var(--red); }
+  .badge.count { background: rgba(255,255,255,.06); color: var(--muted); }
+
+  /* address chips: a stable color dot + clickable nickname, used in the
+     trace list and in every waterfall row so the same agent always reads
+     the same way wherever it appears. */
+  .addr-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    cursor: pointer;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    padding: 1px 7px;
+    border-radius: 8px;
+    background: rgba(255,255,255,.04);
+  }
+  .addr-chip:hover { background: rgba(255,255,255,.1); }
+  .addr-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .arrow { color: var(--muted); margin: 0 1px; }
+
+  main#detail { overflow-y: auto; padding: 24px 32px; }
+  #empty-state { color: var(--muted); margin-top: 60px; text-align: center; max-width: 480px; margin-left: auto; margin-right: auto; line-height: 1.6; }
+  #waterfall.hidden, #empty-state.hidden { display: none; }
+  #trace-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 4px;
+  }
+  #trace-title .tid {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    color: #545a6b;
+  }
+  .help-line {
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.6;
+    max-width: 760px;
+    margin: 4px 0 18px;
+  }
+  .help-line b { color: var(--text); }
+  .row { margin-bottom: 16px; }
+  .row-label {
+    font-size: 12.5px;
+    margin-bottom: 4px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .row-label .tag {
+    font-size: 11px;
+    color: var(--muted);
+    background: rgba(255,255,255,.05);
+    padding: 1px 6px;
+    border-radius: 8px;
+  }
+  .row-label .tag.payload { color: var(--text); background: rgba(91,140,255,.15); }
+  .row-label .latency { color: var(--muted); margin-left: auto; font-size: 12px; }
+  .row-track {
+    position: relative;
+    height: 26px;
+    background: var(--panel);
+    border-radius: 4px;
+    border: 1px solid var(--border);
+  }
+  .bar {
+    position: absolute;
+    top: 3px;
+    bottom: 3px;
+    min-width: 4px;
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    padding: 0 6px;
+    font-size: 11px;
+    color: #0b0c10;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .bar.state-delivered { background: var(--green); }
+  .bar.state-timeout { background: var(--amber); }
+  .bar.state-dropped { background: var(--red); }
+  .bar.state-pending {
+    background: repeating-linear-gradient(45deg, var(--grey), var(--grey) 6px, #444a5c 6px, #444a5c 12px);
+    color: var(--text);
+  }
+  .row-flag {
+    margin-top: 6px;
+    padding: 8px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .row-flag.dropped { background: rgba(232,72,76,.1); border: 1px solid rgba(232,72,76,.35); }
+  .row-flag.timeout { background: rgba(232,162,61,.1); border: 1px solid rgba(232,162,61,.35); }
+  .row-flag .headline { font-weight: 700; margin-bottom: 2px; }
+  .row-flag.dropped .headline { color: var(--red); }
+  .row-flag.timeout .headline { color: var(--amber); }
+  .row-flag .reg { color: var(--muted); }
+  .row-flag .reg b { color: var(--text); }
+  .legend {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 20px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .legend span { display: flex; align-items: center; gap: 6px; }
+  .legend .dot { width: 10px; height: 10px; border-radius: 2px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="trace-list">
+    <h1>Traces <span class="live-dot" title="polling for new traces"></span></h1>
+    <div class="sidebar-help">
+      A <b style="color:var(--text)">trace</b> is one logical message flow -- e.g. a
+      request and its reply -- grouped automatically using uAgents' own session id.
+      Click a trace to see its waterfall.
+    </div>
+    <div id="traces"></div>
+  </aside>
+  <main id="detail">
+    <div id="empty-state">
+      Select a trace on the left to see its waterfall.<br><br>
+      No traces yet? Run an agent that uses <code>traced_send</code> / <code>@trace</code>
+      from uagents-trace -- e.g. <code>examples/two_agents.py</code> -- and they'll show
+      up here automatically.
+    </div>
+    <div id="waterfall" class="hidden">
+      <div id="trace-title"></div>
+      <div class="help-line">
+        Each row below is one <b>span</b>: a single send or receive. Bar position = when
+        it started, length = latency, color = outcome. Click any address to give it a
+        nickname -- shared with <code>uagents-trace alias</code> on the terminal.
+      </div>
+      <div class="legend">
+        <span><i class="dot" style="background:var(--green)"></i> delivered</span>
+        <span><i class="dot" style="background:var(--amber)"></i> timeout</span>
+        <span><i class="dot" style="background:var(--red)"></i> dropped</span>
+        <span><i class="dot" style="background:var(--grey)"></i> pending</span>
+      </div>
+      <div id="rows"></div>
+    </div>
+  </main>
+</div>
+<script>
+const POLL_MS = 2500;
+const TRACK_WIDTH = 640;
+let selectedTraceId = null;
+
+// address -> name, sourced from the same SQLite `aliases` table the CLI
+// reads and writes (`uagents-trace alias add/list/remove`), so a nickname
+// set here or on the terminal shows up in both places.
+let aliases = {};
+
+async function loadAliases() {
+  try {
+    const list = await fetchJSON("/api/aliases");
+    aliases = {};
+    for (const a of list) aliases[a.address] = a.name;
+  } catch (e) {
+    console.error("failed to load aliases", e);
+  }
+}
+
+function shortAddr(addr) {
+  if (!addr) return "?";
+  return addr.length > 14 ? addr.slice(0, 10) + "…" + addr.slice(-4) : addr;
+}
+
+function hashHue(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) >>> 0;
+  return h % 360;
+}
+function addrColor(addr) {
+  return addr ? `hsl(${hashHue(addr)}, 65%, 60%)` : "hsl(0,0%,50%)";
+}
+function displayName(addr) {
+  if (!addr) return "?";
+  return aliases[addr] || shortAddr(addr);
+}
+function addrChip(addr) {
+  if (!addr) return '<span class="addr-chip"><i class="addr-dot" style="background:#555"></i>?</span>';
+  return `<span class="addr-chip" data-addr="${addr}" title="${addr}\nclick to set a nickname">` +
+         `<i class="addr-dot" style="background:${addrColor(addr)}"></i>${displayName(addr)}</span>`;
+}
+
+async function renameAddr(addr) {
+  const current = aliases[addr] || "";
+  const name = prompt(`Nickname for this agent (saved in the alias table -- also visible from the CLI):\n${addr}\n\nLeave blank to clear.`, current);
+  if (name === null) return;
+  try {
+    if (name.trim() === "") {
+      await fetch(`/api/aliases/${encodeURIComponent(addr)}`, { method: "DELETE" });
+    } else {
+      await fetch("/api/aliases", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name.trim(), address: addr }),
+      });
+    }
+  } catch (e) {
+    console.error("failed to save alias", e);
+    return;
+  }
+  await tick();
+}
+
+document.addEventListener("click", (e) => {
+  const chip = e.target.closest(".addr-chip");
+  if (chip && chip.dataset.addr) {
+    e.stopPropagation();
+    renameAddr(chip.dataset.addr);
+  }
+});
+
+function fmtTime(ms) {
+  return new Date(ms).toLocaleTimeString();
+}
+
+async function fetchJSON(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${url} -> ${res.status}`);
+  return res.json();
+}
+
+function renderTraceList(traces) {
+  const container = document.getElementById("traces");
+  container.innerHTML = "";
+
+  if (traces.length === 0) {
+    container.innerHTML = '<div class="empty">No traces recorded yet. They\'ll appear here as soon as an instrumented agent sends or receives a message.</div>';
+    return;
+  }
+
+  for (const t of traces) {
+    const el = document.createElement("div");
+    el.className = "trace-item" + (t.trace_id === selectedTraceId ? " selected" : "");
+    const participantsHtml = t.participants.map(addrChip).join('<span class="arrow">&harr;</span>');
+    el.innerHTML = `
+      <div class="participants">${participantsHtml}</div>
+      <div class="ptypes">${t.payload_types.join(", ")}</div>
+      <div class="meta">
+        <span class="time">${fmtTime(t.started_at)}</span>
+        <span>
+          <span class="badge count">${t.span_count} span${t.span_count === 1 ? "" : "s"}</span>
+          ${t.has_failure ? '<span class="badge fail">FAILURE</span>' : '<span class="badge ok">ok</span>'}
+        </span>
+      </div>
+      <div class="tid">${t.trace_id}</div>`;
+    el.addEventListener("click", (e) => {
+      if (e.target.closest(".addr-chip")) return;
+      selectTrace(t.trace_id);
+    });
+    container.appendChild(el);
+  }
+}
+
+function explainFailure(span) {
+  if (span.dest_registered === false) {
+    return "Likely cause: destination is not registered/reachable (dropped because dest not registered).";
+  } else if (span.dest_registered === true) {
+    return "Destination appears registered/reachable -- this failed for another reason (see error below).";
+  }
+  return "Destination registration status is unknown.";
+}
+
+function regLabel(v) {
+  if (v === true) return "registered";
+  if (v === false) return "NOT registered";
+  return "unknown";
+}
+
+function renderWaterfall(traceId, spans) {
+  document.getElementById("trace-title").innerHTML = spans.length
+    ? [...new Set(spans.flatMap((s) => [s.source_agent, s.dest_agent]))].map(addrChip).join('<span class="arrow">&harr;</span>') +
+      `<span class="tid">${traceId}</span>`
+    : `<span class="tid">${traceId}</span>`;
+
+  const rows = document.getElementById("rows");
+  rows.innerHTML = "";
+
+  if (spans.length === 0) {
+    rows.innerHTML = '<div style="color:var(--muted)">No spans in this trace.</div>';
+    return;
+  }
+
+  const traceStart = Math.min(...spans.map((s) => s.enqueued_at));
+  const traceEnd = Math.max(...spans.map((s) => s.acked_at || s.enqueued_at || Date.now()));
+  const span_ms = Math.max(traceEnd - traceStart, 1);
+  const pxPerMs = TRACK_WIDTH / span_ms;
+
+  for (const s of spans) {
+    const latencyMs = s.acked_at != null ? s.acked_at - s.enqueued_at : null;
+    const left = Math.max(0, (s.enqueued_at - traceStart) * pxPerMs);
+    const width = latencyMs != null ? Math.max(4, latencyMs * pxPerMs) : 18;
+
+    const row = document.createElement("div");
+    row.className = "row";
+
+    const isFailure = s.state === "dropped" || s.state === "timeout";
+    const flagHtml = isFailure
+      ? `<div class="row-flag ${s.state}">
+           <div class="headline">${s.state === "dropped" ? "⚠ DROPPED" : "⏱ TIMEOUT"}</div>
+           <div>${explainFailure(s)}</div>
+           <div class="reg">error: <b>${s.error || "(no error message)"}</b></div>
+           <div class="reg">source registered: <b>${regLabel(s.source_registered)}</b> &middot; dest registered: <b>${regLabel(s.dest_registered)}</b></div>
+         </div>`
+      : "";
+
+    row.innerHTML = `
+      <div class="row-label">
+        ${addrChip(s.source_agent)}<span class="arrow">&rarr;</span>${addrChip(s.dest_agent)}
+        ${s.protocol ? `<span class="tag">${s.protocol}</span>` : ""}
+        <span class="tag payload">${s.payload_type}</span>
+        <span class="latency">${latencyMs != null ? latencyMs + " ms" : "pending…"}</span>
+      </div>
+      <div class="row-track">
+        <div class="bar state-${s.state}" style="left:${left}px;width:${width}px" title="${s.payload_type}: ${latencyMs != null ? latencyMs + 'ms' : s.state}"></div>
+      </div>
+      ${flagHtml}
+    `;
+    rows.appendChild(row);
+  }
+}
+
+async function selectTrace(traceId) {
+  selectedTraceId = traceId;
+  document.getElementById("empty-state").classList.add("hidden");
+  document.getElementById("waterfall").classList.remove("hidden");
+  const url = new URL(location.href);
+  url.searchParams.set("trace", traceId);
+  history.replaceState(null, "", url);
+  await refreshTraceDetail();
+  refreshTraceList();
+}
+
+async function refreshTraceDetail() {
+  if (!selectedTraceId) return;
+  try {
+    const spans = await fetchJSON(`/api/traces/${selectedTraceId}`);
+    renderWaterfall(selectedTraceId, spans);
+  } catch (e) {
+    console.error("failed to load trace detail", e);
+  }
+}
+
+async function refreshTraceList() {
+  try {
+    const traces = await fetchJSON("/api/traces");
+    renderTraceList(traces);
+  } catch (e) {
+    console.error("failed to load traces", e);
+  }
+}
+
+async function tick() {
+  await loadAliases();
+  await refreshTraceList();
+  await refreshTraceDetail();
+}
+
+const initialTraceId = new URL(location.href).searchParams.get("trace");
+if (initialTraceId) {
+  selectTrace(initialTraceId);
+}
+
+tick();
+setInterval(tick, POLL_MS);
+</script>
+</body>
+</html>
