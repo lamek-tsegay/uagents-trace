@@ -310,6 +310,7 @@ async def save_watch_config(
     addresses: list[str],
     filter_only: bool,
     orchestrator: str | None = None,
+    view_mode: str | None = None,
 ) -> None:
     import json
 
@@ -331,6 +332,12 @@ async def save_watch_config(
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 ("orchestrator", orchestrator),
             )
+        if view_mode:
+            await db.execute(
+                "INSERT INTO watch_config (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                ("view_mode", view_mode),
+            )
         await db.commit()
 
 
@@ -351,4 +358,5 @@ async def load_watch_config(db_path: str) -> dict[str, Any] | None:
         "addresses": json.loads(data["addresses"]),
         "filter_only": data.get("filter_only", "true") == "true",
         "orchestrator": data.get("orchestrator"),
+        "view_mode": data.get("view_mode", "linear"),
     }

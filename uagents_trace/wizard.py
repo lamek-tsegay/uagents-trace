@@ -6,10 +6,13 @@ watch config to SQLite.
 """
 
 from dataclasses import dataclass
+from typing import Literal
 
 from .store import default_db_path, init_db, load_watch_config, save_watch_config, set_alias
 
 INDENT = "  "
+
+ViewMode = Literal["linear", "tree"]
 
 
 @dataclass
@@ -19,6 +22,7 @@ class WatchSetup:
     filter_only: bool
     db_path: str
     orchestrator: str | None = None
+    view_mode: ViewMode = "linear"
 
 
 def _looks_like_address(value: str) -> bool:
@@ -90,6 +94,7 @@ async def run_wizard(db_path: str | None = None) -> WatchSetup:
             filter_only=filter_only,
             db_path=db_path,
             orchestrator=orchestrator,
+            view_mode=saved.get("view_mode", "linear"),
         )
 
     while True:
@@ -133,4 +138,5 @@ async def run_wizard(db_path: str | None = None) -> WatchSetup:
         filter_only=filter_only,
         db_path=db_path,
         orchestrator=orchestrator,
+        view_mode="linear",
     )
