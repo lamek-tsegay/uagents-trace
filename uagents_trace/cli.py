@@ -20,7 +20,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .protocols import build_payment_steps, is_payment_trace
-from .shape import HUB, MULTI_LEVEL, build_hub_legs, classify_trace_shape
+from .shape import HUB, MULTI_LEVEL, TreeNode, build_hub_legs, build_interaction_tree, classify_trace_shape
 from .store import (
     default_db_path,
     get_alias_map,
@@ -167,6 +167,46 @@ def print_hub(spans: list[dict[str, Any]], hub: str, alias_map: dict[str, str], 
     print()
 
 
+def _tree_status_label(node: TreeNode) -> str:
+    if node.state == "completed":
+        lat = fmt_duration(node.latency_ms) if node.latency_ms is not None else ""
+        return f"✓ {lat}".strip()
+    if node.state == "failed":
+        return f"✗ {node.reason or 'failed'}"
+    if node.state == "pending":
+        return "… pending"
+    return ""
+
+
+def _print_tree_children(node: TreeNode, alias_map: dict[str, str], color: bool, prefix: str = "") -> None:
+    for i, child in enumerate(node.children):
+        is_last = i == len(node.children) - 1
+        branch = "└── " if is_last else "├── "
+        continuation = "    " if is_last else "│   "
+        label = display_name(child.agent, alias_map)
+        tag = f"[{child.payload_type}] " if child.payload_type else ""
+        msg = f'"{child.message}"' if child.message else ""
+        detail = " ".join(p for p in (tag + msg, _tree_status_label(child)) if p).strip()
+        line = f" {prefix}{branch}{label}  {detail}".rstrip()
+        state_code = ANSI.get(child.state or "pending", "37")
+        print(colorize(line, state_code, color))
+        if child.children:
+            _print_tree_children(child, alias_map, color, prefix + continuation)
+
+
+def print_hub_tree(spans: list[dict[str, Any]], hub: str, alias_map: dict[str, str], color: bool) -> None:
+    """Fan-out tree: orchestrator root with sub-agents branching below."""
+    hub_label = display_name(hub, alias_map)
+    print(f"TREE {hub_label}\n")
+    tree = build_interaction_tree(spans, hub)
+    if not tree.children:
+        print("  Waiting for dispatch to sub-agents…")
+        print()
+        return
+    _print_tree_children(tree, alias_map, color)
+    print()
+
+
 def print_payment(spans: list[dict[str, Any]], alias_map: dict[str, str], color: bool) -> None:
     """Numbered payment-protocol steps (request -> commit -> complete/reject/
     cancel) with the FET amount and verify outcome, instead of the generic
@@ -263,7 +303,13 @@ def select_trace(traces: list[dict[str, Any]], trace_id: Optional[str], nth: Opt
     return traces[n - 1]
 
 
-async def print_trace_detail(db_path: str, trace_id: str, color: bool) -> None:
+async def print_trace_detail(
+    db_path: str,
+    trace_id: str,
+    color: bool,
+    *,
+    view: str = "linear",
+) -> None:
     """Shared rendering body for `show` and `watch`: participants, then the
     hub/peer/flat detail view, dispatched by trace shape.
     """
@@ -303,7 +349,10 @@ async def print_trace_detail(db_path: str, trace_id: str, color: bool) -> None:
 
     shape, hub_agent = classify_trace_shape(spans)
     if shape == HUB:
-        print_hub(spans, hub_agent, alias_map, color)
+        if view == "tree":
+            print_hub_tree(spans, hub_agent, alias_map, color)
+        else:
+            print_hub(spans, hub_agent, alias_map, color)
     else:
         if shape == MULTI_LEVEL:
             print("(multi-level trace, showing flat view)\n")
@@ -321,7 +370,7 @@ async def cmd_show(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     trace = select_trace(traces, args.trace_id, args.nth)
-    await print_trace_detail(db_path, trace["trace_id"], color)
+    await print_trace_detail(db_path, trace["trace_id"], color, view=args.view)
 
 
 async def cmd_watch(args: argparse.Namespace) -> None:
@@ -351,7 +400,7 @@ async def cmd_watch(args: argparse.Namespace) -> None:
         if not traces:
             console.print("No traces recorded yet. Waiting...")
         else:
-            await print_trace_detail(db_path, traces[0]["trace_id"], color)
+            await print_trace_detail(db_path, traces[0]["trace_id"], color, view="linear")
         try:
             await asyncio.wait_for(stop.wait(), timeout=1)
         except asyncio.TimeoutError:
@@ -454,6 +503,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Show the Nth most recent trace (1 = latest, 2 = second most recent, etc.) "
         "instead of passing a trace id",
+    )
+    show_p.add_argument(
+        "--view",
+        choices=["linear", "tree"],
+        default="linear",
+        help="Hub trace layout: linear (stacked rows) or tree (fan-out branches)",
     )
     show_p.set_defaults(func=cmd_show)
 
