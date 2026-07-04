@@ -1,6 +1,15 @@
 import unittest
 
-from uagents_trace.shape import HUB, MULTI_LEVEL, PEER, build_hub_legs, classify_trace_shape
+from uagents_trace.shape import (
+    HUB,
+    MULTI_LEVEL,
+    PEER,
+    TreeNode,
+    build_hub_legs,
+    build_interaction_tree,
+    classify_trace_shape,
+    tree_node_to_dict,
+)
 
 
 def span(
@@ -88,6 +97,56 @@ class BuildHubLegsTests(unittest.TestCase):
         spans = [span("ORCH", "SUB1", payload_type="Task", state="pending", enqueued_at=0, acked_at=None)]
         legs = build_hub_legs(spans, "ORCH")
         self.assertEqual(legs[0]["state"], "pending")
+
+
+class BuildInteractionTreeTests(unittest.TestCase):
+    def test_fan_out_completed_and_failed(self):
+        spans = [
+            span("ORCH", "SUB1", payload_type="Task", enqueued_at=0, acked_at=5, state="delivered"),
+            span("SUB1", "ORCH", payload_type="Result", enqueued_at=5, acked_at=15, state="delivered"),
+            span(
+                "ORCH",
+                "SUB2",
+                payload_type="Task",
+                enqueued_at=0,
+                acked_at=200,
+                state="dropped",
+                error="Could not resolve destination endpoint.",
+            ),
+            span("ORCH", "SUB3", payload_type="Task", enqueued_at=0, acked_at=5, state="delivered"),
+        ]
+        tree = build_interaction_tree(spans, "ORCH")
+        self.assertEqual(tree.agent, "ORCH")
+        self.assertEqual(len(tree.children), 3)
+        by_agent = {c.agent: c for c in tree.children}
+        self.assertEqual(by_agent["SUB1"].state, "completed")
+        self.assertEqual(by_agent["SUB1"].latency_ms, 15)
+        self.assertEqual(by_agent["SUB2"].state, "failed")
+        self.assertIn("resolve", by_agent["SUB2"].reason or "")
+        self.assertEqual(by_agent["SUB3"].state, "pending")
+
+    def test_nested_fan_out(self):
+        spans = [
+            span("ORCH", "SUB1", payload_type="Task", enqueued_at=0, acked_at=5, state="delivered"),
+            span("SUB1", "SUB1A", payload_type="Task", enqueued_at=10, acked_at=15, state="delivered"),
+            span("SUB1A", "SUB1", payload_type="Result", enqueued_at=15, acked_at=25, state="delivered"),
+            span("SUB1", "ORCH", payload_type="Result", enqueued_at=30, acked_at=40, state="delivered"),
+        ]
+        tree = build_interaction_tree(spans, "ORCH")
+        self.assertEqual(len(tree.children), 1)
+        sub1 = tree.children[0]
+        self.assertEqual(sub1.agent, "SUB1")
+        self.assertEqual(sub1.state, "completed")
+        self.assertEqual(len(sub1.children), 1)
+        self.assertEqual(sub1.children[0].agent, "SUB1A")
+        self.assertEqual(sub1.children[0].state, "completed")
+
+    def test_tree_node_to_dict(self):
+        tree = TreeNode(agent="ORCH", children=[TreeNode(agent="SUB1", state="pending")])
+        data = tree_node_to_dict(tree)
+        self.assertEqual(data["agent"], "ORCH")
+        self.assertEqual(data["children"][0]["agent"], "SUB1")
+        self.assertEqual(data["children"][0]["state"], "pending")
 
 
 if __name__ == "__main__":
