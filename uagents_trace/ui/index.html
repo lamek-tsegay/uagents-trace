@@ -130,7 +130,7 @@
 
   main#detail { overflow-y: auto; padding: 24px 32px; }
   #empty-state { color: var(--muted); margin-top: 60px; text-align: center; max-width: 480px; margin-left: auto; margin-right: auto; line-height: 1.6; }
-  #waterfall.hidden, #empty-state.hidden { display: none; }
+  #waterfall.hidden, #empty-state.hidden, #trace-detail.hidden { display: none; }
   #trace-title {
     display: flex;
     align-items: center;
@@ -220,6 +220,55 @@
   }
   .legend span { display: flex; align-items: center; gap: 6px; }
   .legend .dot { width: 10px; height: 10px; border-radius: 2px; }
+
+  #trace-detail.hidden, #empty-state.hidden { display: none; }
+  .view-switcher {
+    display: flex;
+    gap: 6px;
+    margin: 12px 0 16px;
+  }
+  .view-switcher button {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+  .view-switcher button:hover { color: var(--text); border-color: var(--accent); }
+  .view-switcher button.active {
+    background: rgba(91,140,255,.15);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .view-panel.hidden { display: none; }
+  .hub-linear { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.8; }
+  .hub-linear .leg { padding: 4px 0; }
+  .hub-linear .leg.completed { color: var(--green); }
+  .hub-linear .leg.failed { color: var(--red); }
+  .hub-linear .leg.pending { color: var(--grey); }
+  .tree-root {
+    display: inline-block;
+    padding: 10px 18px;
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    font-weight: 700;
+    margin-bottom: 16px;
+  }
+  .tree-node {
+    margin-left: 20px;
+    padding: 6px 0 6px 12px;
+    border-left: 2px solid var(--border);
+    font-size: 13px;
+  }
+  .tree-node.completed { border-left-color: var(--green); }
+  .tree-node.failed { border-left-color: var(--red); }
+  .tree-node.pending { border-left-color: var(--grey); }
+  .tree-node .label { font-weight: 600; }
+  .tree-node .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .view-unavailable { color: var(--muted); font-size: 13px; padding: 20px 0; }
 </style>
 </head>
 <body>
@@ -235,25 +284,45 @@
   </aside>
   <main id="detail">
     <div id="empty-state">
-      Select a trace on the left to see its waterfall.<br><br>
+      Select a trace on the left to see its detail.<br><br>
       No traces yet? Run an agent that uses <code>traced_send</code> / <code>@trace</code>
       from uagents-trace -- e.g. <code>examples/two_agents.py</code> -- and they'll show
       up here automatically.
     </div>
-    <div id="waterfall" class="hidden">
+    <div id="trace-detail" class="hidden">
       <div id="trace-title"></div>
-      <div class="help-line">
-        Each row below is one <b>span</b>: a single send or receive. Bar position = when
-        it started, length = latency, color = outcome. Click any address to give it a
-        nickname -- shared with <code>uagents-trace alias</code> on the terminal.
+      <div class="view-switcher">
+        <button type="button" data-view="waterfall" class="active">Waterfall</button>
+        <button type="button" data-view="linear">Linear</button>
+        <button type="button" data-view="tree">Tree</button>
       </div>
-      <div class="legend">
-        <span><i class="dot" style="background:var(--green)"></i> delivered</span>
-        <span><i class="dot" style="background:var(--amber)"></i> timeout</span>
-        <span><i class="dot" style="background:var(--red)"></i> dropped</span>
-        <span><i class="dot" style="background:var(--grey)"></i> pending</span>
+      <div id="panel-waterfall" class="view-panel">
+        <div class="help-line">
+          Each row below is one <b>span</b>: a single send or receive. Bar position = when
+          it started, length = latency, color = outcome. Click any address to give it a
+          nickname -- shared with <code>uagents-trace alias</code> on the terminal.
+        </div>
+        <div class="legend">
+          <span><i class="dot" style="background:var(--green)"></i> delivered</span>
+          <span><i class="dot" style="background:var(--amber)"></i> timeout</span>
+          <span><i class="dot" style="background:var(--red)"></i> dropped</span>
+          <span><i class="dot" style="background:var(--grey)"></i> pending</span>
+        </div>
+        <div id="rows"></div>
       </div>
-      <div id="rows"></div>
+      <div id="panel-linear" class="view-panel hidden">
+        <div class="help-line">
+          One row per sub-agent leg: dispatch from the orchestrator, then reply or failure.
+        </div>
+        <div id="linear-content" class="hub-linear"></div>
+      </div>
+      <div id="panel-tree" class="view-panel hidden">
+        <div class="help-line">
+          Fan-out tree: orchestrator at the root, sub-agents as branches. Branches stay open
+          while pending and show success when the reply arrives.
+        </div>
+        <div id="tree-content"></div>
+      </div>
     </div>
   </main>
 </div>
@@ -261,6 +330,8 @@
 const POLL_MS = 2500;
 const TRACK_WIDTH = 640;
 let selectedTraceId = null;
+let detailView = localStorage.getItem("uagents_trace_view") || "waterfall";
+let cachedSpans = [];
 
 // address -> name, sourced from the same SQLite `aliases` table the CLI
 // reads and writes (`uagents-trace alias add/list/remove`), so a nickname
@@ -386,12 +457,38 @@ function regLabel(v) {
   return "unknown";
 }
 
-function renderWaterfall(traceId, spans) {
+function fmtDuration(ms) {
+  if (ms == null) return "…";
+  return ms >= 1000 ? (ms / 1000).toFixed(2) + "s" : ms + " ms";
+}
+
+function setDetailView(view) {
+  detailView = view;
+  localStorage.setItem("uagents_trace_view", view);
+  document.querySelectorAll(".view-switcher button").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.view === view);
+  });
+  document.getElementById("panel-waterfall").classList.toggle("hidden", view !== "waterfall");
+  document.getElementById("panel-linear").classList.toggle("hidden", view !== "linear");
+  document.getElementById("panel-tree").classList.toggle("hidden", view !== "tree");
+}
+
+document.querySelectorAll(".view-switcher button").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    setDetailView(btn.dataset.view);
+    refreshTraceDetail();
+  });
+});
+
+function renderTraceTitle(traceId, spans) {
   document.getElementById("trace-title").innerHTML = spans.length
     ? [...new Set(spans.flatMap((s) => [s.source_agent, s.dest_agent]))].map(addrChip).join('<span class="arrow">&harr;</span>') +
       `<span class="tid">${traceId}</span>`
     : `<span class="tid">${traceId}</span>`;
+}
 
+function renderWaterfall(traceId, spans) {
+  renderTraceTitle(traceId, spans);
   const rows = document.getElementById("rows");
   rows.innerHTML = "";
 
@@ -439,10 +536,59 @@ function renderWaterfall(traceId, spans) {
   }
 }
 
+function renderLinearHub(hub, legs) {
+  const container = document.getElementById("linear-content");
+  const hubLabel = displayName(hub);
+  let html = `<div style="margin-bottom:12px;font-weight:700">HUB ${hubLabel}</div>`;
+  for (let i = 0; i < legs.length; i++) {
+    const leg = legs[i];
+    const connector = i === legs.length - 1 ? "└─" : "├─";
+    const sub = displayName(leg.subagent);
+    const dispatch = `──${leg.dispatch_payload}──>`;
+    let line;
+    if (leg.state === "completed") {
+      line = `${connector} ${dispatch} ${sub}  ╌╌${leg.reply_payload}╌╌▶  ${fmtDuration(leg.latency_ms)}`;
+    } else if (leg.state === "failed") {
+      line = `${connector} ${dispatch} ${sub}  ✗ ${leg.reason || "failed"}`;
+    } else {
+      line = `${connector} ${dispatch} ${sub}  …pending`;
+    }
+    html += `<div class="leg ${leg.state}">${line}</div>`;
+  }
+  container.innerHTML = html;
+}
+
+function renderTreeNode(node, depth = 0) {
+  if (depth === 0) {
+    return `<div class="tree-root">${addrChip(node.agent)}</div>` +
+      node.children.map((c) => renderTreeNode(c, 1)).join("");
+  }
+  const state = node.state || "pending";
+  const tag = node.payload_type ? `[${node.payload_type}] ` : "";
+  const msg = node.message ? `"${node.message}"` : "";
+  let status = "";
+  if (state === "completed") status = `✓ ${fmtDuration(node.latency_ms)}`;
+  else if (state === "failed") status = `✗ ${node.reason || "failed"}`;
+  else status = "… pending";
+  let html = `<div class="tree-node ${state}"><div class="label">${addrChip(node.agent)}</div>` +
+    `<div class="meta">${tag}${msg} ${status}</div>`;
+  for (const child of node.children) {
+    html += renderTreeNode(child, depth + 1);
+  }
+  html += "</div>";
+  return html;
+}
+
+function renderTree(tree) {
+  const container = document.getElementById("tree-content");
+  container.innerHTML = renderTreeNode(tree);
+}
+
 async function selectTrace(traceId) {
   selectedTraceId = traceId;
   document.getElementById("empty-state").classList.add("hidden");
-  document.getElementById("waterfall").classList.remove("hidden");
+  document.getElementById("trace-detail").classList.remove("hidden");
+  setDetailView(detailView);
   const url = new URL(location.href);
   url.searchParams.set("trace", traceId);
   history.replaceState(null, "", url);
@@ -453,8 +599,28 @@ async function selectTrace(traceId) {
 async function refreshTraceDetail() {
   if (!selectedTraceId) return;
   try {
-    const spans = await fetchJSON(`/api/traces/${selectedTraceId}`);
-    renderWaterfall(selectedTraceId, spans);
+    cachedSpans = await fetchJSON(`/api/traces/${selectedTraceId}`);
+    renderTraceTitle(selectedTraceId, cachedSpans);
+
+    if (detailView === "waterfall") {
+      renderWaterfall(selectedTraceId, cachedSpans);
+    } else if (detailView === "linear") {
+      try {
+        const data = await fetchJSON(`/api/traces/${selectedTraceId}/hub-legs`);
+        renderLinearHub(data.hub, data.legs);
+      } catch {
+        document.getElementById("linear-content").innerHTML =
+          '<div class="view-unavailable">Linear hub view is only available for orchestrator fan-out traces (3+ agents, one hub dispatching to several sub-agents).</div>';
+      }
+    } else if (detailView === "tree") {
+      try {
+        const tree = await fetchJSON(`/api/traces/${selectedTraceId}/tree`);
+        renderTree(tree);
+      } catch {
+        document.getElementById("tree-content").innerHTML =
+          '<div class="view-unavailable">Tree view is only available for orchestrator fan-out traces (3+ agents, one hub dispatching to several sub-agents).</div>';
+      }
+    }
   } catch (e) {
     console.error("failed to load trace detail", e);
   }
@@ -476,6 +642,7 @@ async function tick() {
 }
 
 const initialTraceId = new URL(location.href).searchParams.get("trace");
+setDetailView(detailView);
 if (initialTraceId) {
   selectTrace(initialTraceId);
 }
