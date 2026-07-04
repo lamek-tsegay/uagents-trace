@@ -4,6 +4,7 @@ from uagents import Model
 
 from uagents_trace.live import (
     build_hub_diagram,
+    build_hub_tree_diagram,
     build_peer_diagram,
     format_event_line,
     format_latency,
@@ -11,6 +12,7 @@ from uagents_trace.live import (
     render_agent_box,
 )
 from uagents_trace.recorder import payload_summary
+from uagents_trace.shape import build_interaction_tree
 
 
 class Hello(Model):
@@ -147,6 +149,48 @@ class LiveFormatTests(unittest.TestCase):
         self.assertIn("SubAgent2", text)
         self.assertIn("success", text)
         self.assertNotIn("◀", text)
+
+    def test_hub_tree_diagram_fan_out(self):
+        spans = [
+            {
+                "source_agent": "orch",
+                "dest_agent": "sub1",
+                "payload_type": "Hello",
+                "payload_summary": "Hi Bob!",
+                "state": "delivered",
+                "direction": "send",
+                "enqueued_at": 0,
+                "acked_at": 3,
+            },
+            {
+                "source_agent": "sub1",
+                "dest_agent": "orch",
+                "payload_type": "Reply",
+                "payload_summary": "done",
+                "state": "delivered",
+                "direction": "send",
+                "enqueued_at": 10,
+                "acked_at": 20,
+            },
+            {
+                "source_agent": "orch",
+                "dest_agent": "sub2",
+                "payload_type": "Hello",
+                "payload_summary": "Hi John!",
+                "state": "delivered",
+                "direction": "send",
+                "enqueued_at": 0,
+                "acked_at": 4,
+            },
+        ]
+        aliases = {"orch": "Orchestrator", "sub1": "SubAgent1", "sub2": "SubAgent2"}
+        tree = build_interaction_tree(spans, "orch")
+        diagram = build_hub_tree_diagram(tree, aliases)
+        text = diagram.plain
+        self.assertIn("Orchestrator", text)
+        self.assertIn("SubAgent1", text)
+        self.assertIn("SubAgent2", text)
+        self.assertIn("├──", text)
 
 
 if __name__ == "__main__":

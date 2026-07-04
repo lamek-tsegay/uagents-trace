@@ -14,9 +14,9 @@ from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Footer, Header, RichLog, Static
 
 from .cli import display_name
-from .shape import HUB, build_hub_legs, classify_trace_shape
-from .store import get_alias_map, get_recent_spans, get_trace_spans
-from .wizard import WatchSetup
+from .shape import HUB, TreeNode, build_hub_legs, build_interaction_tree, classify_trace_shape
+from .store import get_alias_map, get_recent_spans, get_trace_spans, save_watch_config
+from .wizard import WatchSetup, ViewMode
 
 POLL_SECONDS = 1.0
 MAX_EVENTS = 15
@@ -281,6 +281,71 @@ def build_hub_diagram(
     return diagram
 
 
+def _node_status_label(node: TreeNode) -> str:
+    if node.state == "completed":
+        lat = _format_ms(node.latency_ms)
+        return f"{STATE_ICON['delivered']} {lat}"
+    if node.state == "failed":
+        icon = STATE_ICON["dropped"]
+        reason = node.reason or "failed"
+        return f"{icon} {reason}"
+    if node.state == "pending":
+        return f"{STATE_ICON['pending']} pending"
+    return ""
+
+
+def _append_tree_children(
+    diagram: Text,
+    node: TreeNode,
+    alias_map: dict[str, str],
+    prefix: str,
+    pad: str,
+) -> None:
+    for i, child in enumerate(node.children):
+        is_last = i == len(node.children) - 1
+        branch = "└── " if is_last else "├── "
+        continuation = "    " if is_last else "│   "
+        label = display_name(child.agent, alias_map)
+        tag = f"[{child.payload_type}] " if child.payload_type else ""
+        msg = f'"{child.message}"' if child.message else ""
+        detail = " ".join(p for p in (tag + msg, _node_status_label(child)) if p).strip()
+        state = child.state or "pending"
+        line = f"{prefix}{branch}{label}  {detail}".rstrip()
+        diagram.append(pad + line + "\n", style=STATE_STYLE.get(state, "white"))
+        if child.children:
+            _append_tree_children(diagram, child, alias_map, prefix + continuation, pad)
+
+
+def build_hub_tree_diagram(
+    tree: TreeNode,
+    alias_map: dict[str, str],
+) -> Text:
+    """Top-down fan-out: orchestrator root, sub-agents as branches below."""
+    orch_name = display_name(tree.agent, alias_map)
+    pad = "  "
+    diagram = Text()
+
+    for line in render_agent_box(orch_name):
+        diagram.append(pad + line + "\n")
+
+    if not tree.children:
+        diagram.append(pad + "  Waiting for dispatch to sub-agents…", style="dim")
+        return diagram
+
+    diagram.append("\n")
+    _append_tree_children(diagram, tree, alias_map, "", pad)
+
+    if diagram.plain.endswith("\n"):
+        diagram.plain = diagram.plain.rstrip("\n")
+
+    return diagram
+
+
+def _sub_title_for(setup: WatchSetup, view_mode: ViewMode) -> str:
+    names = ", ".join(setup.names.values()) if setup.names else "all agents"
+    return f"watching {names}  ·  view: {view_mode}  ·  v toggle  ·  q quit"
+
+
 def _span_in_watch(span: dict[str, Any], addresses: set[str] | None) -> bool:
     if not addresses:
         return True
@@ -314,13 +379,17 @@ class LiveApp(App):
     }
     """
 
-    BINDINGS = [Binding("q", "quit", "Quit")]
+    BINDINGS = [
+        Binding("q", "quit", "Quit"),
+        Binding("v", "cycle_view", "View"),
+    ]
 
     def __init__(self, setup: WatchSetup):
         super().__init__()
         self.setup = setup
         self.db_path = setup.db_path
         self.addresses = setup.addresses if setup.filter_only else None
+        self.view_mode: ViewMode = setup.view_mode
         self._span_states: dict[str, str] = {}
         self._events: deque[Text] = deque(maxlen=MAX_EVENTS)
         self._active_trace_id: str | None = None
@@ -337,8 +406,7 @@ class LiveApp(App):
 
     async def on_mount(self) -> None:
         self.title = "uagents-trace live"
-        names = ", ".join(self.setup.names.values()) if self.setup.names else "all agents"
-        self.sub_title = f"watching {names}  ·  updates every 1s  ·  q quit"
+        self.sub_title = _sub_title_for(self.setup, self.view_mode)
         events_log = self.query_one("#events-panel", RichLog)
         events_log.write(Text("  Live messages will appear here…", style="dim"))
         await self._bootstrap()
@@ -395,6 +463,18 @@ class LiveApp(App):
         if new_events or self._active_trace_id:
             await self._refresh_display()
 
+    async def action_cycle_view(self) -> None:
+        self.view_mode = "tree" if self.view_mode == "linear" else "linear"
+        self.sub_title = _sub_title_for(self.setup, self.view_mode)
+        await save_watch_config(
+            self.db_path,
+            list(self.setup.addresses),
+            self.setup.filter_only,
+            self.setup.orchestrator,
+            view_mode=self.view_mode,
+        )
+        await self._refresh_display()
+
     async def _refresh_display(self) -> None:
         content = self.query_one("#diagram-content", Static)
         scroll = self.query_one("#diagram-scroll", VerticalScroll)
@@ -429,7 +509,11 @@ class LiveApp(App):
                 use_hub = True
                 hub_addr = self.setup.orchestrator
             if use_hub and hub_addr:
-                renderable = build_hub_diagram(spans, hub_addr, self._alias_map)
+                if self.view_mode == "tree":
+                    tree = build_interaction_tree(spans, hub_addr)
+                    renderable = build_hub_tree_diagram(tree, self._alias_map)
+                else:
+                    renderable = build_hub_diagram(spans, hub_addr, self._alias_map)
             else:
                 renderable = build_peer_diagram(sends, self._alias_map)
         else:
