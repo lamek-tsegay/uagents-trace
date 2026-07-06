@@ -263,3 +263,72 @@ def build_hub_topology(
     return canvas.to_text()
 
 
+def build_peer_topology(
+    left_name: str,
+    right_name: str,
+    *,
+    state: str = "completed",
+    pulse: bool = False,
+) -> Text:
+    """Two boxed agents with a single outbound arrow — details in the table."""
+    style = _line_style(state, pulse)
+    left_w = max(len(left_name) + 2, BOX_MIN_WIDTH)
+    right_w = max(len(right_name) + 2, BOX_MIN_WIDTH)
+    gap = 24
+    total_w = left_w + gap + right_w + 4
+    canvas = Canvas(total_w, 11)
+
+    lx = (total_w - left_w - gap - right_w) // 2
+    rx = lx + left_w + gap
+    _, left_cx = canvas.draw_box(lx, 4, left_name)
+    _, right_cx = canvas.draw_box(rx, 4, right_name)
+
+    canvas.hline(left_cx, right_cx - 1, 2, style)
+    canvas.text_over(right_cx, 2, "▶", style)
+
+    glyph, glyph_style = _status_glyph(state, pulse)
+    canvas.text_over(left_cx, 8, glyph, glyph_style)
+    canvas.text_over(right_cx, 8, glyph, glyph_style)
+
+    return canvas.to_text()
+
+
+def assemble_centered_diagram(topology: Text, table: Text, legend: Text) -> Text:
+    """Stack topology, table, and legend centered as one block."""
+    width = _block_width(topology)
+    width = max(width, _block_width(table), len(legend.plain))
+    result = Text()
+    result.append_text(_center_plain_block(topology, width))
+    result.append("\n\n")
+    result.append_text(_center_plain_block(table, width))
+    result.append("\n")
+    legend_line = legend.plain.strip()
+    pad = max(0, (width - len(legend_line)) // 2)
+    result.append(" " * pad, style=MUTED)
+    result.append(legend_line, style=MUTED)
+    return result
+
+
+def center_in_width(block: Text, width: int) -> Text:
+    """Center a multi-line block within a given character width."""
+    lines = list(block.split("\n"))
+    content_width = max((len(line.plain) for line in lines if line.plain.strip()), default=0)
+    left_pad = max(0, (width - content_width) // 2)
+    result = Text()
+    for i, line in enumerate(lines):
+        if i:
+            result.append("\n")
+        if not line.plain.strip():
+            continue
+        result.append(" " * left_pad)
+        result.append_text(line)
+    return result
+
+
+def _center_plain_block(block: Text, width: int) -> Text:
+    return center_in_width(block, width)
+
+
+# Back-compat aliases
+build_hub_network = build_hub_topology
+build_peer_network = build_peer_topology
