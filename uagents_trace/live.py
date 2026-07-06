@@ -29,7 +29,12 @@ from .shape import HUB, TreeNode, build_hub_legs, build_interaction_tree, classi
 from .store import get_alias_map, get_recent_spans, get_trace_spans, list_traces, save_watch_config
 from .wizard import WatchSetup, ViewMode
 
-POLL_SECONDS = 1.0
+# Poll SQLite for new spans; 3s keeps the UI calm without feeling laggy for
+# typical multi-agent round trips (often seconds, not milliseconds).
+POLL_SECONDS = 3.0
+# Pending-indicator blink — slower than poll so the diagram is not constantly redrawing.
+PULSE_SECONDS = 1.5
+MAX_EVENTS = 15
 MAX_EVENTS = 15
 MAX_TRACE_LIST = 25
 TRACE_WIDGET_PREFIX = "trace-"
