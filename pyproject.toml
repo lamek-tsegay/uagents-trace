@@ -15,6 +15,7 @@ dependencies = [
     "aiosqlite>=0.20",
     "rich>=13.0",
     "textual>=0.50",
+    "questionary>=2.0",
 ]
 
 [project.scripts]
