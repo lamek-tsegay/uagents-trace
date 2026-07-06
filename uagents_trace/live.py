@@ -442,21 +442,68 @@ def _is_send_event(span: dict[str, Any]) -> bool:
 
 
 class LiveApp(App):
-    """Live architecture diagram + rolling message feed for one trace."""
+    """Live network diagram + trace list + rolling message feed."""
 
     CSS = """
-    #diagram-scroll {
-        height: 1fr;
-        border: solid $primary;
+    Screen {
+        background: #0a0f0d;
+    }
+    Header {
+        background: #111916;
+        color: #34d399;
+    }
+    Footer {
+        background: #111916;
+        color: #6b7280;
+    }
+    #main-row {
+        height: 3fr;
+    }
+    #trace-list {
+        width: 30;
+        border: round #1f3d32;
+        background: #080c0a;
         padding: 0 1;
+    }
+    #trace-list > ListView {
+        height: 100%;
+    }
+    #trace-list Label {
+        color: #9ca3af;
+    }
+    #trace-list .-highlight {
+        background: #1a2e26;
+        color: #34d399;
+        text-style: bold;
+    }
+    #diagram-col {
+        width: 1fr;
+        height: 1fr;
+        border: round #34d399;
+        background: #0d1210;
+        padding: 1 2;
     }
     #diagram-content {
         width: 100%;
-        padding: 1 1;
+        height: auto;
+    }
+    #detail-bar {
+        height: 1;
+        padding: 0 2;
+        color: #6b7280;
+        background: #0a0f0d;
+    }
+    #events-header {
+        height: 1;
+        padding: 0 2;
+        color: #34d399;
+        text-style: bold;
+        background: #0a0f0d;
     }
     #events-panel {
-        height: 1fr;
-        border: solid $accent;
+        height: 2fr;
+        border: round #1f3d32;
+        background: #080c0a;
         padding: 0 1;
     }
     Vertical {
@@ -467,6 +514,9 @@ class LiveApp(App):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("v", "cycle_view", "View"),
+        Binding("f", "toggle_follow", "Follow"),
+        Binding("[", "prev_trace", "Older trace", show=False),
+        Binding("]", "next_trace", "Newer trace", show=False),
     ]
 
     def __init__(self, setup: WatchSetup):
@@ -476,26 +526,43 @@ class LiveApp(App):
         self.addresses = setup.addresses if setup.filter_only else None
         self.view_mode: ViewMode = setup.view_mode
         self._span_states: dict[str, str] = {}
+        self._logged_span_ids: set[str] = set()
         self._events: deque[Text] = deque(maxlen=MAX_EVENTS)
         self._active_trace_id: str | None = None
+        self._trace_ids: list[str] = []
         self._alias_map: dict[str, str] = {}
         self._bootstrapped = False
+        self._follow_latest = True
+        self._pulse_on = False
+        self._detail_text = "Select a trace or wait for messages…"
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
         with Vertical():
-            with VerticalScroll(id="diagram-scroll"):
-                yield Static("", id="diagram-content")
+            with Horizontal(id="main-row"):
+                yield ListView(id="trace-list")
+                with Vertical(id="diagram-col"):
+                    yield Static("", id="diagram-content")
+            yield Static("", id="detail-bar")
+            yield Static("Live messages", id="events-header")
             yield RichLog(id="events-panel", highlight=False, markup=False, auto_scroll=True)
         yield Footer()
 
     async def on_mount(self) -> None:
         self.title = "uagents-trace live"
-        self.sub_title = _sub_title_for(self.setup, self.view_mode)
+        self.sub_title = _sub_title_for(self.setup, self.view_mode, follow=self._follow_latest)
         events_log = self.query_one("#events-panel", RichLog)
-        events_log.write(Text("  Live messages will appear here…", style="dim"))
+        events_log.write(Text("  Waiting for message flow…", style="#6b7280"))
+        self.query_one("#detail-bar", Static).update(self._detail_text)
         await self._bootstrap()
         self.set_interval(POLL_SECONDS, self._poll)
+        self.set_interval(PULSE_SECONDS, self._pulse_tick)
+
+    async def _pulse_tick(self) -> None:
+        if not self._bootstrapped:
+            return
+        self._pulse_on = not self._pulse_on
+        await self._refresh_display(pulse_only=True)
 
     async def _bootstrap(self) -> None:
         self._alias_map = await get_alias_map(self.db_path)
