@@ -659,9 +659,15 @@ class LiveApp(App):
         if not self._bootstrapped:
             return
         self._alias_map = await get_alias_map(self.db_path)
+        prev_latest = self._trace_ids[0] if self._trace_ids else None
+        await self._refresh_trace_list()
+
         spans = await get_recent_spans(self.db_path, limit=100, addresses=self.addresses)
         events_log = self.query_one("#events-panel", RichLog)
         new_events = False
+
+        if self._follow_latest and self._trace_ids and self._trace_ids[0] != self._active_trace_id:
+            await self._select_trace(self._trace_ids[0], follow=True)
 
         for span in spans:
             prev = self._span_states.get(span["id"])
@@ -672,24 +678,27 @@ class LiveApp(App):
 
             if current not in ("delivered", "dropped", "timeout"):
                 continue
-            if not _is_send_event(span):
-                continue
             if not _span_in_watch(span, self.addresses if self.setup.filter_only else None):
                 continue
 
-            self._switch_trace(span["trace_id"])
-            if self._active_trace_id == span["trace_id"]:
+            if self._follow_latest and span["trace_id"] != self._active_trace_id:
+                await self._select_trace(span["trace_id"], follow=True)
+
+            if span["trace_id"] == self._active_trace_id:
+                if span["id"] in self._logged_span_ids:
+                    continue
+                self._logged_span_ids.add(span["id"])
                 line = format_event_line(span, self._alias_map)
                 self._events.append(line)
                 events_log.write(line)
                 new_events = True
 
-        if new_events or self._active_trace_id:
+        if new_events or prev_latest != (self._trace_ids[0] if self._trace_ids else None):
             await self._refresh_display()
 
     async def action_cycle_view(self) -> None:
         self.view_mode = "tree" if self.view_mode == "linear" else "linear"
-        self.sub_title = _sub_title_for(self.setup, self.view_mode)
+        self.sub_title = _sub_title_for(self.setup, self.view_mode, follow=self._follow_latest)
         await save_watch_config(
             self.db_path,
             list(self.setup.addresses),
@@ -699,20 +708,33 @@ class LiveApp(App):
         )
         await self._refresh_display()
 
-    async def _refresh_display(self) -> None:
+    def _diagram_panel_width(self) -> int:
+        col = self.query_one("#diagram-col")
+        # Inner width: subtract horizontal padding (2+2) and border (1+1).
+        return max(col.size.width - 8, 0)
+
+    def _center_for_panel(self, renderable: Text) -> Text:
+        width = self._diagram_panel_width()
+        if width < 20:
+            return renderable
+        return center_in_width(renderable, width)
+
+    async def _refresh_display(self, *, pulse_only: bool = False) -> None:
         content = self.query_one("#diagram-content", Static)
-        scroll = self.query_one("#diagram-scroll", VerticalScroll)
+        detail = self.query_one("#detail-bar", Static)
 
         if not self._active_trace_id:
-            content.update(
-                Text(
-                    "  Waiting for messages…\n\n"
-                    "  Start your instrumented agents\n"
-                    "  in another terminal.",
-                    style="dim",
+            if not pulse_only:
+                content.update(
+                    self._center_for_panel(
+                        Text(
+                            "Waiting for messages…\n\n"
+                            "Start your instrumented agents\n"
+                            "in another terminal.",
+                            style="dim",
+                        )
+                    )
                 )
-            )
-            scroll.scroll_end(animate=False)
             return
 
         spans = await get_trace_spans(self.db_path, self._active_trace_id)
@@ -722,8 +744,12 @@ class LiveApp(App):
         sends = [
             s
             for s in spans
-            if s.get("direction") == "send" and s.get("state") in ("delivered", "dropped", "timeout")
+            if s.get("direction") == "send"
+            and s.get("state") in ("delivered", "dropped", "timeout", "pending")
         ]
+
+        pending = any(s.get("state") == "pending" for s in spans)
+        pulse = self._pulse_on and pending
 
         if sends:
             shape, hub = classify_trace_shape(spans)
@@ -737,14 +763,45 @@ class LiveApp(App):
                     tree = build_interaction_tree(spans, hub_addr)
                     renderable = build_hub_tree_diagram(tree, self._alias_map)
                 else:
-                    renderable = build_hub_diagram(spans, hub_addr, self._alias_map)
+                    renderable = build_hub_network_diagram(
+                        spans, hub_addr, self._alias_map, pulse=pulse
+                    )
             else:
-                renderable = build_peer_diagram(sends, self._alias_map)
+                renderable = build_peer_network_diagram(sends, self._alias_map, pulse=pulse)
         else:
-            renderable = Text("  Waiting for messages in this trace…", style="dim")
+            renderable = Text("Waiting for messages in this trace…", style="dim")
 
-        content.update(renderable)
-        scroll.scroll_end(animate=False)
+        content.update(self._center_for_panel(renderable))
+
+        if not pulse_only:
+            shape, hub = classify_trace_shape(spans)
+            hub_addr = self.setup.orchestrator or hub
+            use_hub = shape == HUB and hub_addr
+            if not use_hub and self.setup.orchestrator and len(self.setup.addresses) >= 3:
+                use_hub = True
+                hub_addr = self.setup.orchestrator
+
+            if use_hub and hub_addr and self.view_mode != "tree":
+                legs = build_hub_legs(spans, hub_addr)
+                orch_name = display_name(hub_addr, self._alias_map)
+                agent_names = [display_name(leg["subagent"], self._alias_map) for leg in legs]
+                self._detail_text = build_hub_detail_summary(
+                    orch_name, legs, agent_names, self._active_trace_id
+                )
+            else:
+                delivered = sum(1 for s in spans if s.get("state") == "delivered")
+                failed = sum(1 for s in spans if s.get("state") in ("dropped", "timeout"))
+                pending_n = sum(1 for s in spans if s.get("state") == "pending")
+                self._detail_text = (
+                    f"trace {self._active_trace_id[:8]}  ·  "
+                    f"{delivered} delivered  ·  {pending_n} pending  ·  {failed} failed  ·  "
+                    f"[ ] switch trace"
+                )
+            detail.update(self._detail_text)
+
+            trace_list = self.query_one("#trace-list", ListView)
+            if self._active_trace_id in self._trace_ids:
+                trace_list.index = self._trace_ids.index(self._active_trace_id)
 
 
 async def run_live(setup: WatchSetup) -> None:
