@@ -14,6 +14,7 @@ from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Footer, Header, RichLog, Static
 
 from .cli import display_name
+from .network_canvas import ERROR, SUCCESS, WARN, format_ms
 from .shape import HUB, TreeNode, build_hub_legs, build_interaction_tree, classify_trace_shape
 from .store import get_alias_map, get_recent_spans, get_trace_spans, save_watch_config
 from .wizard import WatchSetup, ViewMode
@@ -122,6 +123,116 @@ def render_agent_box(label: str, width: int | None = None) -> list[str]:
         "│" + inner + "│",
         "└" + "─" * w + "┘",
     ]
+
+
+def build_hub_leg_table(legs: list[dict[str, Any]], agent_names: list[str]) -> Text:
+    """Fixed-column summary of per-agent latencies and status."""
+    col_agent, col_out, col_in, col_total, col_status = 12, 8, 8, 8, 10
+    header = (
+        f"{'Agent':<{col_agent}}"
+        f"{'Out':>{col_out}}"
+        f"{'In':>{col_in}}"
+        f"{'Total':>{col_total}}"
+        f"{'Status':>{col_status}}"
+    )
+    table = Text(header + "\n", style=MUTED)
+    for leg, name in zip(legs, agent_names):
+        state = leg.get("state", "pending")
+        out_ms = format_ms(leg.get("dispatch_ms"))
+        in_ms = format_ms(leg.get("reply_ms")) if state == "completed" else "…"
+        total_ms = format_ms(leg.get("latency_ms")) if state == "completed" else "…"
+        if state == "completed":
+            status = "✓ done"
+            row_style = SUCCESS
+        elif state == "failed":
+            status = "✗ failed"
+            row_style = ERROR
+        else:
+            status = "⋯ waiting"
+            row_style = WARN
+        row = (
+            f"{name:<{col_agent}}"
+            f"{out_ms:>{col_out}}"
+            f"{in_ms:>{col_in}}"
+            f"{total_ms:>{col_total}}"
+            f"{status:>{col_status}}"
+        )
+        table.append(row + "\n", style=row_style)
+    return table
+
+
+def build_peer_leg_table(
+    left_name: str,
+    right_name: str,
+    *,
+    message_ms: int | None,
+    reply_ms: int | None,
+    state: str,
+) -> Text:
+    """Two-row table for peer round-trip."""
+    col_route, col_dir, col_ms, col_status = 20, 6, 8, 10
+    header = (
+        f"{'Route':<{col_route}}"
+        f"{'Dir':>{col_dir}}"
+        f"{'Time':>{col_ms}}"
+        f"{'Status':>{col_status}}"
+    )
+    table = Text(header + "\n", style=MUTED)
+    route_out = f"{left_name} → {right_name}"
+    route_in = f"{right_name} → {left_name}"
+
+    out_status = "✓ done" if state != "failed" else "✗ failed"
+    out_style = ERROR if state == "failed" else (WARN if state == "pending" else SUCCESS)
+    row_out = (
+        f"{route_out:<{col_route}}"
+        f"{'out':>{col_dir}}"
+        f"{format_ms(message_ms):>{col_ms}}"
+        f"{out_status:>{col_status}}"
+    )
+    table.append(row_out + "\n", style=out_style)
+
+    if reply_ms is not None:
+        row_in = (
+            f"{route_in:<{col_route}}"
+            f"{'in':>{col_dir}}"
+            f"{format_ms(reply_ms):>{col_ms}}"
+            f"{'✓ done':>{col_status}}"
+        )
+        table.append(row_in + "\n", style=SUCCESS)
+    elif state == "pending":
+        row_in = (
+            f"{route_in:<{col_route}}"
+            f"{'in':>{col_dir}}"
+            f"{'…':>{col_ms}}"
+            f"{'⋯ waiting':>{col_status}}"
+        )
+        table.append(row_in + "\n", style=WARN)
+
+    return table
+
+
+MUTED = "#6b7280"
+
+
+def build_hub_detail_summary(
+    hub_name: str,
+    legs: list[dict[str, Any]],
+    agent_names: list[str],
+    trace_id: str,
+) -> str:
+    n = len(legs)
+    complete = sum(1 for leg in legs if leg.get("state") == "completed")
+    failed = sum(1 for leg in legs if leg.get("state") == "failed")
+    names = ", ".join(agent_names)
+    latencies = [leg["latency_ms"] for leg in legs if leg.get("latency_ms") is not None]
+    parts = [f"{hub_name} dispatched to {names} · {complete}/{n} complete"]
+    if failed:
+        parts.append(f"{failed} failed")
+    if latencies:
+        parts.append(f"round-trip {format_ms(max(latencies))} max")
+    parts.append(f"trace {trace_id[:8]}")
+    return "  ·  ".join(parts)
+
 
 
 def _hstack_blocks(blocks: list[list[str]], gap: str = "  ") -> list[str]:
