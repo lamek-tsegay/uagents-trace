@@ -1,18 +1,32 @@
-"""Interactive Q&A setup for the live trace viewer.
+"""Interactive setup for the live trace viewer.
 
-Replaces manual `uagents-trace alias add` commands with a short wizard that
-collects agent seeds/addresses and friendly names, then saves aliases and
-watch config to SQLite.
+Collects agent seeds/addresses and friendly names, saves aliases and watch
+config to SQLite, then hands off to the live diagram.
 """
 
+from __future__ import annotations
+
+import sys
 from dataclasses import dataclass
 from typing import Literal
 
-from .store import default_db_path, init_db, load_watch_config, save_watch_config, set_alias
+import questionary
+from questionary import Style
+
+from .store import default_db_path, init_db, list_aliases, load_watch_config, save_watch_config, set_alias
+
+ViewMode = Literal["linear", "tree"]
 
 INDENT = "  "
 
-ViewMode = Literal["linear", "tree"]
+PROMPT_STYLE = Style([("qmark", "fg:cyan bold"), ("question", "bold"), ("answer", "fg:cyan bold")])
+
+AGENT_COUNT_CHOICES = {
+    "2 agents — peer conversation": 2,
+    "3 agents — orchestrator + 2 sub-agents": 3,
+    "4 agents — orchestrator + 3 sub-agents": 4,
+    "Custom number…": None,
+}
 
 
 @dataclass
@@ -37,32 +51,106 @@ def resolve_address(seed_or_address: str) -> str:
     return Identity.from_seed(seed_or_address.strip(), 0).address
 
 
-def _prompt(text: str, *, default: str | None = None, example: str | None = None) -> str:
-    if example:
-        line = f"{INDENT}{text} (e.g. {example}): "
-    else:
-        line = f"{INDENT}{text}: "
+def _exit_on_cancel(value) -> None:
+    if value is None:
+        print()
+        sys.exit(130)
+
+
+async def _prompt_agent_count() -> int:
+    choice = await questionary.select(
+        "How many agents do you want to watch?",
+        choices=list(AGENT_COUNT_CHOICES.keys()),
+        style=PROMPT_STYLE,
+    ).ask_async()
+    _exit_on_cancel(choice)
+
+    count = AGENT_COUNT_CHOICES[choice]
+    if count is not None:
+        return count
 
     while True:
-        value = input(line).strip()
-        if value:
-            return value
-        if default is not None:
-            return default
-        print(f"{INDENT}Please enter a value.")
+        raw = await questionary.text(
+            "Enter number of agents:",
+            validate=lambda t: t.strip().isdigit() and int(t.strip()) >= 1 or "Enter an integer ≥ 1",
+            style=PROMPT_STYLE,
+        ).ask_async()
+        _exit_on_cancel(raw)
+        return int(raw.strip())
 
 
-def _prompt_yes_no(text: str, default_yes: bool = True) -> bool:
-    hint = "Y/n" if default_yes else "y/N"
-    value = input(f"{INDENT}{text} [{hint}]: ").strip().lower()
-    if not value:
-        return default_yes
-    return value in ("y", "yes")
+async def _prompt_seed_or_address(agent_index: int, *, orchestrator: bool) -> str:
+    label = "Seed or address" + (" (orchestrator)" if orchestrator else "")
+    raw = await questionary.text(
+        label,
+        validate=lambda t: bool(t.strip()) or "Required",
+        style=PROMPT_STYLE,
+    ).ask_async()
+    _exit_on_cancel(raw)
+    return raw.strip()
+
+
+async def _prompt_friendly_name(agent_index: int, *, default: str) -> str:
+    raw = await questionary.text(
+        "Friendly name",
+        default=default,
+        style=PROMPT_STYLE,
+    ).ask_async()
+    _exit_on_cancel(raw)
+    value = raw.strip()
+    return value or default
+
+
+async def _prompt_filter_only() -> bool:
+    value = await questionary.confirm(
+        "Show only these agents (hide other traces)?",
+        default=True,
+        style=PROMPT_STYLE,
+    ).ask_async()
+    _exit_on_cancel(value)
+    return value
+
+
+async def _prompt_use_saved_setup() -> bool:
+    value = await questionary.confirm(
+        "Use your last setup?",
+        default=True,
+        style=PROMPT_STYLE,
+    ).ask_async()
+    _exit_on_cancel(value)
+    return value
+
+
+async def _restore_saved_setup(db_path: str, saved: dict) -> WatchSetup:
+    addresses = set(saved["addresses"])
+    names: dict[str, str] = {}
+    for alias in await list_aliases(db_path):
+        if alias["address"] in addresses:
+            names[alias["address"]] = alias["name"]
+
+    label = ", ".join(names.get(a, a[:12] + "…") for a in saved["addresses"])
+    print(f"\n{INDENT}Watching: {label}")
+    print(f"{INDENT}Start your agents, then press Enter to open the live view…")
+    try:
+        input()
+    except KeyboardInterrupt:
+        print()
+        sys.exit(130)
+
+    return WatchSetup(
+        addresses=addresses,
+        names=names,
+        filter_only=saved["filter_only"],
+        db_path=db_path,
+        orchestrator=saved.get("orchestrator"),
+        view_mode=saved.get("view_mode", "linear"),
+    )
 
 
 async def run_wizard(db_path: str | None = None) -> WatchSetup:
     db_path = db_path or default_db_path()
     await init_db(db_path)
+    saved = await load_watch_config(db_path)
 
     print()
     print("=" * 56)
@@ -73,50 +161,21 @@ async def run_wizard(db_path: str | None = None) -> WatchSetup:
     print(f"{INDENT}This tool only watches — it does not run agents for you.")
     print()
 
-    saved = await load_watch_config(db_path)
-    if saved and _prompt_yes_no("Use your last setup?", default_yes=True):
-        addresses = set(saved["addresses"])
-        names: dict[str, str] = {}
-        from .store import list_aliases
+    if saved and await _prompt_use_saved_setup():
+        return await _restore_saved_setup(db_path, saved)
 
-        for alias in await list_aliases(db_path):
-            if alias["address"] in addresses:
-                names[alias["address"]] = alias["name"]
-        filter_only = saved["filter_only"]
-        orchestrator = saved.get("orchestrator")
-        label = ", ".join(names.get(a, a[:12] + "…") for a in saved["addresses"])
-        print(f"\n{INDENT}Watching: {label}")
-        print(f"{INDENT}Start your agents, then press Enter to open the live view…")
-        input()
-        return WatchSetup(
-            addresses=addresses,
-            names=names,
-            filter_only=filter_only,
-            db_path=db_path,
-            orchestrator=orchestrator,
-            view_mode=saved.get("view_mode", "linear"),
-        )
-
-    while True:
-        count_str = _prompt("How many agents do you want to watch?", default="2", example="2")
-        try:
-            count = int(count_str)
-            if count < 1:
-                raise ValueError
-            break
-        except ValueError:
-            print(f"{INDENT}Enter a number 1 or greater.")
-
+    count = await _prompt_agent_count()
     addresses: set[str] = set()
     names: dict[str, str] = {}
     orchestrator: str | None = None
 
     for i in range(1, count + 1):
-        example_name = "Orchestrator" if i == 1 else f"SubAgent{i - 1}"
-        print(f"\n{INDENT}Agent {i}" + (" (orchestrator)" if i == 1 else ""))
-        seed_or_addr = _prompt("Seed or address")
+        is_orch = i == 1 and count >= 2
+        print(f"\n{INDENT}Agent {i}" + (" (orchestrator)" if is_orch else ""))
+        seed_or_addr = await _prompt_seed_or_address(i, orchestrator=is_orch)
         address = resolve_address(seed_or_addr)
-        name = _prompt("Friendly name", default=example_name, example=example_name)
+        default_name = "Orchestrator" if is_orch else (f"SubAgent{i - 1}" if count >= 2 else "Agent")
+        name = await _prompt_friendly_name(i, default=default_name)
         addresses.add(address)
         names[address] = name
         if i == 1:
@@ -124,13 +183,17 @@ async def run_wizard(db_path: str | None = None) -> WatchSetup:
         await set_alias(db_path, name, address)
         print(f"{INDENT}✓ {name} registered")
 
-    filter_only = _prompt_yes_no("Show only these agents (hide other traces)?", default_yes=True)
+    filter_only = await _prompt_filter_only()
     await save_watch_config(db_path, list(addresses), filter_only, orchestrator)
 
     label = ", ".join(names[a] for a in addresses)
     print(f"\n{INDENT}Watching: {label}")
     print(f"{INDENT}Start your agents in another terminal, then press Enter…")
-    input()
+    try:
+        input()
+    except KeyboardInterrupt:
+        print()
+        sys.exit(130)
 
     return WatchSetup(
         addresses=addresses,
