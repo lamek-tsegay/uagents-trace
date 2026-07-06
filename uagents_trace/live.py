@@ -355,83 +355,6 @@ def _format_ms(ms: int | None) -> str:
     return f"{ms}ms"
 
 
-def build_hub_diagram(
-    spans: list[dict[str, Any]],
-    hub: str,
-    alias_map: dict[str, str],
-) -> Text:
-    """Orchestrator fan-out: dispatch to sub-agents, success returns on the right."""
-    orch_name = display_name(hub, alias_map)
-    legs = build_hub_legs(spans, hub)
-    pad = "  "
-    diagram = Text()
-
-    if not legs:
-        for line in render_agent_box(orch_name):
-            diagram.append(pad + line + "\n")
-        diagram.append(pad + "  Waiting for dispatch to sub-agents…", style="dim")
-        return diagram
-
-    for i, leg in enumerate(legs):
-        if i > 0:
-            diagram.append("\n\n")
-
-        sub = display_name(leg["subagent"], alias_map)
-        state = leg.get("state", "pending")
-        orch_box = render_agent_box(orch_name)
-        sub_box = render_agent_box(sub)
-
-        dispatch_lat = _format_ms(leg.get("dispatch_ms"))
-        if state == "failed":
-            dispatch_state = "dropped"
-            dispatch_icon = STATE_ICON["dropped"]
-        elif state == "completed":
-            dispatch_state = "delivered"
-            dispatch_icon = STATE_ICON["delivered"]
-        else:
-            dispatch_state = "pending"
-            dispatch_icon = STATE_ICON["pending"]
-
-        dispatch_arrow = _hop_arrow_block(dispatch_icon, dispatch_lat)
-
-        if state == "completed":
-            reply_lat = _format_ms(leg.get("reply_ms"))
-            reply_arrow = _hop_arrow_block(STATE_ICON["delivered"], f"success {reply_lat}")
-            return_box = render_agent_box(orch_name)
-            row_lines = _hstack_blocks([orch_box, dispatch_arrow, sub_box, reply_arrow, return_box])
-            row_style = "green"
-        elif state == "failed":
-            row_lines = _hstack_blocks([orch_box, dispatch_arrow, sub_box])
-            row_style = "red"
-        else:
-            row_lines = _hstack_blocks([orch_box, dispatch_arrow, sub_box])
-            row_style = "grey58"
-
-        for line in row_lines:
-            diagram.append(pad)
-            if dispatch_icon in line and state != "pending":
-                before, _, after = line.partition(dispatch_icon)
-                diagram.append(before)
-                diagram.append_text(_styled_icon(dispatch_state))
-                diagram.append(after, style=row_style)
-            elif state == "completed" and STATE_ICON["delivered"] in line and "success" in line:
-                before, _, after = line.partition(STATE_ICON["delivered"])
-                diagram.append(before)
-                diagram.append_text(_styled_icon("delivered"))
-                diagram.append(after, style="green")
-            else:
-                diagram.append(line, style=row_style)
-            diagram.append("\n")
-
-        if state == "failed" and leg.get("reason"):
-            diagram.append(pad + f"  ✗ {leg['reason']}\n", style="red")
-
-    if diagram.plain.endswith("\n"):
-        diagram.plain = diagram.plain.rstrip("\n")
-
-    return diagram
-
-
 def _node_status_label(node: TreeNode) -> str:
     if node.state == "completed":
         lat = _format_ms(node.latency_ms)
@@ -500,17 +423,6 @@ def _sub_title_for(setup: WatchSetup, view_mode: ViewMode, *, follow: bool) -> s
     names = ", ".join(setup.names.values()) if setup.names else "all agents"
     follow_hint = "follow" if follow else "pinned"
     return f"{names}  ·  {_view_label(view_mode)}  ·  {follow_hint}  ·  v view  f follow  q quit"
-
-
-
-    names = ", ".join(setup.names.values()) if setup.names else "all agents"
-    follow_hint = "follow" if follow else "pinned"
-    return f"{names}  ·  {_view_label(view_mode)}  ·  {follow_hint}  ·  v view  f follow  q quit"
-
-
-
-    names = ", ".join(setup.names.values()) if setup.names else "all agents"
-    return f"watching {names}  ·  view: {view_mode}  ·  v toggle  ·  q quit"
 
 
 def _trace_matches_watch(trace: dict[str, Any], addresses: set[str] | None) -> bool:
