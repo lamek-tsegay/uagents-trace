@@ -43,6 +43,9 @@ AGENT_COUNT_CHOICES = {
     "Custom number…": None,
 }
 
+SEED_HINT = "example_agent_seed"
+ADDRESS_HINT = "agent1q…"
+
 console = Console()
 
 
@@ -151,11 +154,12 @@ async def _prompt_agent_count() -> int:
 
 
 async def _prompt_seed_or_address(agent_index: int, *, orchestrator: bool) -> str:
-    label = "Seed or address" + (" (orchestrator)" if orchestrator else "")
+    role = "orchestrator" if orchestrator else "agent"
     raw = await questionary.text(
-        label,
+        f"{role.capitalize()} seed or address",
         validate=lambda t: bool(t.strip()) or "Required",
         style=PROMPT_STYLE,
+        instruction=f"seed e.g. {SEED_HINT}  ·  address e.g. {ADDRESS_HINT}",
     ).ask_async()
     _exit_on_cancel(raw)
     return raw.strip()
@@ -163,9 +167,10 @@ async def _prompt_seed_or_address(agent_index: int, *, orchestrator: bool) -> st
 
 async def _prompt_friendly_name(agent_index: int, *, default: str) -> str:
     raw = await questionary.text(
-        "Friendly name",
+        "Display name",
         default=default,
         style=PROMPT_STYLE,
+        instruction="shown on the live diagram",
     ).ask_async()
     _exit_on_cancel(raw)
     value = raw.strip()
@@ -174,7 +179,7 @@ async def _prompt_friendly_name(agent_index: int, *, default: str) -> str:
 
 async def _prompt_filter_only() -> bool:
     value = await questionary.confirm(
-        "Show only these agents (hide other traces)?",
+        "Hide traces that don't involve these agents?",
         default=True,
         style=PROMPT_STYLE,
     ).ask_async()
@@ -184,7 +189,7 @@ async def _prompt_filter_only() -> bool:
 
 async def _prompt_use_saved_setup() -> bool:
     value = await questionary.confirm(
-        "Use your last setup?",
+        "Resume with your previous agent setup?",
         default=True,
         style=PROMPT_STYLE,
     ).ask_async()
