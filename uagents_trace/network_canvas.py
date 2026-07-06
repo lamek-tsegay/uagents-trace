@@ -114,3 +114,152 @@ def format_ms(ms: int | None) -> str:
 
 def build_diagram_legend() -> Text:
     return Text("outbound · return · pending", style=MUTED)
+
+
+def _block_width(text: Text) -> int:
+    lines = [line for line in text.plain.split("\n") if line.strip()]
+    return max((len(line) for line in lines), default=0)
+
+
+def _agent_columns(n: int, box_widths: list[int]) -> tuple[list[tuple[int, int]], int]:
+    """Return ([(x_start, center_x), ...], total_width) — agents evenly spaced and centered."""
+    if n == 0:
+        return [], 0
+    col_w = max(max(box_widths) + AGENT_GAP, 22)
+    total_w = n * col_w
+    positions = []
+    for i, bw in enumerate(box_widths):
+        x0 = i * col_w + (col_w - bw) // 2
+        positions.append((x0, x0 + bw // 2))
+    return positions, total_w
+
+
+def _line_style(state: str, pulse: bool) -> str:
+    if pulse and state == "pending":
+        return WARN
+    if state == "completed":
+        return SUCCESS
+    return STATE_STYLE.get(state, ACCENT)
+
+
+def _stem_style(legs: list[dict[str, Any]], pulse: bool) -> str:
+    if legs and all(leg.get("state") == "completed" for leg in legs):
+        return SUCCESS
+    if any(leg.get("state") == "failed" for leg in legs):
+        return ERROR
+    if pulse and any(leg.get("state") == "pending" for leg in legs):
+        return WARN
+    return ACCENT
+
+
+def _bus_junction_char(x: int, hub_cx: int, agent_centers: set[int]) -> str:
+    if x == hub_cx or x in agent_centers:
+        return "┬"
+    return "─"
+
+
+def _draw_hub_arrows(
+    canvas: Canvas,
+    hub_cx: int,
+    agent_centers: list[int],
+    leg_states: list[str],
+    *,
+    pulse: bool,
+) -> None:
+    """One orthogonal arrow per sub-agent: stem → bus → drop → ▼."""
+    if not agent_centers:
+        return
+
+    bus_style = _stem_style(
+        [{"state": s} for s in leg_states],
+        pulse,
+    )
+    arrow_tip = AGENT_ROW - 1
+
+    if len(agent_centers) == 1:
+        cx = agent_centers[0]
+        style = _line_style(leg_states[0], pulse)
+        if cx == hub_cx:
+            canvas.vline(hub_cx, LINE_TOP, arrow_tip - 1, style)
+            canvas.text_over(hub_cx, arrow_tip, "▼", style)
+        else:
+            canvas.vline(hub_cx, LINE_TOP, BUS_ROW - 1, style)
+            lo, hi = min(hub_cx, cx), max(hub_cx, cx)
+            for x in range(lo, hi + 1):
+                if x == hub_cx:
+                    ch = "┬"
+                elif x == cx:
+                    ch = "┬"
+                else:
+                    ch = "─"
+                canvas.text_over(x, BUS_ROW, ch, style)
+            canvas.vline(cx, BUS_ROW + 1, arrow_tip - 1, style)
+            canvas.text_over(cx, arrow_tip, "▼", style)
+        return
+
+    min_x = min(agent_centers)
+    max_x = max(agent_centers)
+
+    canvas.vline(hub_cx, LINE_TOP, BUS_ROW - 1, bus_style)
+    for x in range(min_x, max_x + 1):
+        ch = _bus_junction_char(x, hub_cx, set(agent_centers))
+        canvas.text_over(x, BUS_ROW, ch, bus_style)
+
+    for agent_cx, state in zip(agent_centers, leg_states):
+        style = _line_style(state, pulse)
+        canvas.vline(agent_cx, BUS_ROW + 1, arrow_tip - 1, style)
+        canvas.text_over(agent_cx, arrow_tip, "▼", style)
+
+
+def _status_glyph(state: str, pulse: bool) -> tuple[str, str]:
+    if pulse and state == "pending":
+        return "◆", WARN
+    return STATUS_GLYPH.get(state, ("·", MUTED))
+
+
+def build_hub_topology(
+    legs: list[dict[str, Any]],
+    hub_name: str,
+    agent_names: list[str],
+    *,
+    pulse: bool = False,
+) -> Text:
+    """Star topology: boxed hub centered above sub-agents, one arrow each."""
+    if not legs:
+        canvas = Canvas(max(len(hub_name) + 6, 28), 6)
+        w = max(len(hub_name) + 2, BOX_MIN_WIDTH)
+        canvas.draw_box((28 - w) // 2, 1, hub_name)
+        canvas.text_over(2, 5, "Waiting for dispatch to sub-agents…", MUTED)
+        return canvas.to_text()
+
+    n = len(legs)
+    box_widths = [max(len(name) + 2, BOX_MIN_WIDTH) for name in agent_names]
+    inner_w = max(len(hub_name) + 2, BOX_MIN_WIDTH)
+    columns, agents_w = _agent_columns(n, box_widths)
+    total_w = max(agents_w, inner_w + 2 + 8)
+
+    hub_x = (total_w - (inner_w + 2)) // 2
+    canvas = Canvas(total_w, CANVAS_HEIGHT)
+    _, hub_cx = canvas.draw_box(hub_x, HUB_ROW, hub_name)
+    subtitle = "orchestrator"
+    canvas.text_over(hub_cx - len(subtitle) // 2, SUBTITLE_ROW, subtitle, MUTED)
+
+    agent_centers: list[int] = []
+    leg_states: list[str] = []
+
+    for i, leg in enumerate(legs):
+        x0, agent_cx = columns[i]
+        offset = (total_w - agents_w) // 2
+        x0 += offset
+        agent_cx += offset
+        canvas.draw_box(x0, AGENT_ROW, agent_names[i])
+        agent_centers.append(agent_cx)
+        leg_states.append(leg.get("state", "pending"))
+        glyph, glyph_style = _status_glyph(leg.get("state", "pending"), pulse)
+        canvas.text_over(agent_cx, STATUS_ROW, glyph, glyph_style)
+
+    _draw_hub_arrows(canvas, hub_cx, agent_centers, leg_states, pulse=pulse)
+
+    return canvas.to_text()
+
+
