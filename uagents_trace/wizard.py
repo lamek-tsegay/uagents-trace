@@ -12,14 +12,29 @@ from typing import Literal
 
 import questionary
 from questionary import Style
+from rich.console import Console
 
 from .store import default_db_path, init_db, list_aliases, load_watch_config, save_watch_config, set_alias
 
 ViewMode = Literal["linear", "tree"]
 
-INDENT = "  "
+ACCENT = "#34d399"
+MUTED = "#6b7280"
+SUCCESS = "#4ade80"
 
-PROMPT_STYLE = Style([("qmark", "fg:cyan bold"), ("question", "bold"), ("answer", "fg:cyan bold")])
+PROMPT_STYLE = Style(
+    [
+        ("qmark", f"fg:{ACCENT} bold"),
+        ("question", "bold"),
+        ("answer", f"fg:{ACCENT} bold"),
+        ("pointer", f"fg:{ACCENT} bold"),
+        ("highlighted", f"fg:{ACCENT} bold"),
+        ("selected", f"fg:{SUCCESS} bold"),
+        ("instruction", f"fg:{MUTED}"),
+        ("text", ""),
+        ("separator", f"fg:{MUTED}"),
+    ]
+)
 
 AGENT_COUNT_CHOICES = {
     "2 agents — peer conversation": 2,
@@ -27,6 +42,8 @@ AGENT_COUNT_CHOICES = {
     "4 agents — orchestrator + 3 sub-agents": 4,
     "Custom number…": None,
 }
+
+console = Console()
 
 
 @dataclass
@@ -53,7 +70,59 @@ def resolve_address(seed_or_address: str) -> str:
 
 def _exit_on_cancel(value) -> None:
     if value is None:
-        print()
+        console.print()
+        sys.exit(130)
+
+
+def _print_header() -> None:
+    console.print()
+    console.print(f"[bold white]uagents-trace[/] [dim {ACCENT}]·[/] [dim]message flow observer[/]")
+    console.print(
+        f"[dim]Wrap sends with [bold]traced_send[/] and handlers with [bold]@trace[/] — "
+        "this viewer records and displays only.[/]"
+    )
+    console.print()
+
+
+def _print_section(title: str) -> None:
+    console.print()
+    console.print(f"[bold {ACCENT}]›[/] [bold]{title}[/]")
+
+
+def _print_done(label: str) -> None:
+    console.print(f"  [{SUCCESS}]●[/] {label}")
+
+
+def _print_ready_summary(
+    names: dict[str, str],
+    addresses: set[str],
+    *,
+    filter_only: bool,
+) -> None:
+    _print_section("Watching")
+    for address in addresses:
+        name = names.get(address, address[:14] + "…")
+        _print_done(name)
+    if filter_only:
+        console.print("  [dim]Scope: registered agents only[/]")
+    else:
+        console.print("  [dim]Scope: all traces touching these agents[/]")
+    _print_go_live()
+
+
+def _print_go_live() -> None:
+    console.print()
+    console.print(f"[bold {ACCENT}]Go live[/]")
+    console.print("  [dim]→[/] Run your instrumented agents in another terminal")
+    console.print("  [dim]→[/] Press Enter here to open the live diagram")
+    console.print()
+
+
+def _wait_for_enter() -> None:
+    try:
+        input()
+    except KeyboardInterrupt:
+        console.print()
         sys.exit(130)
 
 
@@ -62,6 +131,8 @@ async def _prompt_agent_count() -> int:
         "How many agents do you want to watch?",
         choices=list(AGENT_COUNT_CHOICES.keys()),
         style=PROMPT_STYLE,
+        use_indicator=True,
+        use_shortcuts=False,
     ).ask_async()
     _exit_on_cancel(choice)
 
@@ -128,14 +199,13 @@ async def _restore_saved_setup(db_path: str, saved: dict) -> WatchSetup:
         if alias["address"] in addresses:
             names[alias["address"]] = alias["name"]
 
-    label = ", ".join(names.get(a, a[:12] + "…") for a in saved["addresses"])
-    print(f"\n{INDENT}Watching: {label}")
-    print(f"{INDENT}Start your agents, then press Enter to open the live view…")
-    try:
-        input()
-    except KeyboardInterrupt:
-        print()
-        sys.exit(130)
+    _print_section("Restored setup")
+    for address in saved["addresses"]:
+        _print_done(names.get(address, address[:14] + "…"))
+    if saved["filter_only"]:
+        console.print("  [dim]Scope: registered agents only[/]")
+    _print_go_live()
+    _wait_for_enter()
 
     return WatchSetup(
         addresses=addresses,
@@ -152,17 +222,12 @@ async def run_wizard(db_path: str | None = None) -> WatchSetup:
     await init_db(db_path)
     saved = await load_watch_config(db_path)
 
-    print()
-    print("=" * 56)
-    print("  uagents-trace — live agent message viewer")
-    print("=" * 56)
-    print()
-    print(f"{INDENT}Your agents must use traced_send and @trace in their code.")
-    print(f"{INDENT}This tool only watches — it does not run agents for you.")
-    print()
+    _print_header()
 
     if saved and await _prompt_use_saved_setup():
         return await _restore_saved_setup(db_path, saved)
+
+    _print_section("Add agents")
 
     count = await _prompt_agent_count()
     addresses: set[str] = set()
@@ -171,29 +236,28 @@ async def run_wizard(db_path: str | None = None) -> WatchSetup:
 
     for i in range(1, count + 1):
         is_orch = i == 1 and count >= 2
-        print(f"\n{INDENT}Agent {i}" + (" (orchestrator)" if is_orch else ""))
+        if count > 1:
+            label = f"Agent {i}/{count}" + (" · orchestrator" if is_orch else "")
+            console.print(f"\n  [dim]{label}[/]")
+
         seed_or_addr = await _prompt_seed_or_address(i, orchestrator=is_orch)
         address = resolve_address(seed_or_addr)
+
         default_name = "Orchestrator" if is_orch else (f"SubAgent{i - 1}" if count >= 2 else "Agent")
         name = await _prompt_friendly_name(i, default=default_name)
+
         addresses.add(address)
         names[address] = name
         if i == 1:
             orchestrator = address
         await set_alias(db_path, name, address)
-        print(f"{INDENT}✓ {name} registered")
+        _print_done(f"{name} saved")
 
     filter_only = await _prompt_filter_only()
     await save_watch_config(db_path, list(addresses), filter_only, orchestrator)
 
-    label = ", ".join(names[a] for a in addresses)
-    print(f"\n{INDENT}Watching: {label}")
-    print(f"{INDENT}Start your agents in another terminal, then press Enter…")
-    try:
-        input()
-    except KeyboardInterrupt:
-        print()
-        sys.exit(130)
+    _print_ready_summary(names, addresses, filter_only=filter_only)
+    _wait_for_enter()
 
     return WatchSetup(
         addresses=addresses,
