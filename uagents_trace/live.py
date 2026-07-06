@@ -10,8 +10,8 @@ from typing import Any
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
-from textual.widgets import Footer, Header, RichLog, Static
+from textual.containers import Horizontal, Vertical
+from textual.widgets import Footer, Header, Label, ListItem, ListView, RichLog, Static
 
 from .cli import display_name
 from .network_canvas import (
@@ -26,11 +26,25 @@ from .network_canvas import (
     format_ms,
 )
 from .shape import HUB, TreeNode, build_hub_legs, build_interaction_tree, classify_trace_shape
-from .store import get_alias_map, get_recent_spans, get_trace_spans, save_watch_config
+from .store import get_alias_map, get_recent_spans, get_trace_spans, list_traces, save_watch_config
 from .wizard import WatchSetup, ViewMode
 
 POLL_SECONDS = 1.0
 MAX_EVENTS = 15
+MAX_TRACE_LIST = 25
+TRACE_WIDGET_PREFIX = "trace-"
+
+
+def _trace_widget_id(trace_id: str) -> str:
+    """Textual widget ids must not start with a digit — UUIDs need a prefix."""
+    return f"{TRACE_WIDGET_PREFIX}{trace_id}"
+
+
+def _trace_id_from_widget_id(widget_id: str) -> str:
+    if widget_id.startswith(TRACE_WIDGET_PREFIX):
+        return widget_id[len(TRACE_WIDGET_PREFIX) :]
+    return widget_id
+
 
 REPLY_PAYLOAD_TYPES = frozenset(
     {
@@ -473,9 +487,31 @@ def build_hub_tree_diagram(
     return diagram
 
 
-def _sub_title_for(setup: WatchSetup, view_mode: ViewMode) -> str:
+def _view_label(view_mode: ViewMode) -> str:
+    return "tree" if view_mode == "tree" else "network"
+
+
+def _sub_title_for(setup: WatchSetup, view_mode: ViewMode, *, follow: bool) -> str:
+    names = ", ".join(setup.names.values()) if setup.names else "all agents"
+    follow_hint = "follow" if follow else "pinned"
+    return f"{names}  ·  {_view_label(view_mode)}  ·  {follow_hint}  ·  v view  f follow  q quit"
+
+
+
+    names = ", ".join(setup.names.values()) if setup.names else "all agents"
+    follow_hint = "follow" if follow else "pinned"
+    return f"{names}  ·  {_view_label(view_mode)}  ·  {follow_hint}  ·  v view  f follow  q quit"
+
+
+
     names = ", ".join(setup.names.values()) if setup.names else "all agents"
     return f"watching {names}  ·  view: {view_mode}  ·  v toggle  ·  q quit"
+
+
+def _trace_matches_watch(trace: dict[str, Any], addresses: set[str] | None) -> bool:
+    if not addresses:
+        return True
+    return any(a in addresses for a in trace["participants"])
 
 
 def _span_in_watch(span: dict[str, Any], addresses: set[str] | None) -> bool:
