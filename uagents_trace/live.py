@@ -569,19 +569,91 @@ class LiveApp(App):
         spans = await get_recent_spans(self.db_path, limit=200, addresses=self.addresses)
         for span in spans:
             self._span_states[span["id"]] = span["state"]
-        if spans:
-            self._active_trace_id = spans[-1]["trace_id"]
+        await self._refresh_trace_list()
+        if self._trace_ids:
+            self._active_trace_id = self._trace_ids[0]
+            await self._reload_feed_for_active_trace()
         self._bootstrapped = True
         await self._refresh_display()
 
-    def _switch_trace(self, trace_id: str) -> None:
-        if self._active_trace_id == trace_id:
+    async def _refresh_trace_list(self) -> None:
+        traces = await list_traces(self.db_path)
+        if self.addresses:
+            traces = [t for t in traces if _trace_matches_watch(t, self.addresses)]
+        traces = traces[:MAX_TRACE_LIST]
+        new_ids = [t["trace_id"] for t in traces]
+        if new_ids == self._trace_ids:
             return
-        self._active_trace_id = trace_id
-        self._events.clear()
+        self._trace_ids = new_ids
+
+        trace_list = self.query_one("#trace-list", ListView)
+        await trace_list.clear()
+        for t in traces:
+            parts = " → ".join(display_name(a, self._alias_map) for a in t["participants"][:3])
+            mark = "✗" if t["has_failure"] else "✓"
+            label = f"{mark} {parts}  {t['trace_id'][:6]}"
+            widget_id = _trace_widget_id(t["trace_id"])
+            trace_list.append(ListItem(Label(label), id=widget_id))
+
+        if self._active_trace_id and self._active_trace_id in self._trace_ids:
+            trace_list.index = self._trace_ids.index(self._active_trace_id)
+
+    async def _reload_feed_for_active_trace(self) -> None:
         events_log = self.query_one("#events-panel", RichLog)
         events_log.clear()
-        events_log.write(Text("  New trace — live messages:", style="bold"))
+        self._events.clear()
+        self._logged_span_ids.clear()
+        if not self._active_trace_id:
+            return
+        spans = await get_trace_spans(self.db_path, self._active_trace_id)
+        for span in spans:
+            if span.get("state") not in ("delivered", "dropped", "timeout"):
+                continue
+            if not _span_in_watch(span, self.addresses):
+                continue
+            if span["id"] in self._logged_span_ids:
+                continue
+            self._logged_span_ids.add(span["id"])
+            line = format_event_line(span, self._alias_map)
+            self._events.append(line)
+            events_log.write(line)
+
+    async def _select_trace(self, trace_id: str, *, follow: bool | None = None) -> None:
+        if follow is not None:
+            self._follow_latest = follow
+        if trace_id == self._active_trace_id:
+            self.sub_title = _sub_title_for(self.setup, self.view_mode, follow=self._follow_latest)
+            return
+        self._active_trace_id = trace_id
+        await self._reload_feed_for_active_trace()
+        self.sub_title = _sub_title_for(self.setup, self.view_mode, follow=self._follow_latest)
+        await self._refresh_display()
+
+    async def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if event.item.id:
+            trace_id = _trace_id_from_widget_id(str(event.item.id))
+            await self._select_trace(trace_id, follow=False)
+
+    async def action_toggle_follow(self) -> None:
+        self._follow_latest = not self._follow_latest
+        if self._follow_latest and self._trace_ids:
+            await self._select_trace(self._trace_ids[0], follow=True)
+        else:
+            self.sub_title = _sub_title_for(self.setup, self.view_mode, follow=self._follow_latest)
+
+    async def action_prev_trace(self) -> None:
+        if not self._trace_ids or not self._active_trace_id:
+            return
+        idx = self._trace_ids.index(self._active_trace_id)
+        if idx + 1 < len(self._trace_ids):
+            await self._select_trace(self._trace_ids[idx + 1], follow=False)
+
+    async def action_next_trace(self) -> None:
+        if not self._trace_ids or not self._active_trace_id:
+            return
+        idx = self._trace_ids.index(self._active_trace_id)
+        if idx > 0:
+            await self._select_trace(self._trace_ids[idx - 1], follow=False)
 
     async def _poll(self) -> None:
         if not self._bootstrapped:
