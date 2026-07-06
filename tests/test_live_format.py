@@ -82,7 +82,7 @@ class LiveFormatTests(unittest.TestCase):
         line = format_event_line(span, {"a": "Alice", "b": "Bob"})
         self.assertIn("Reply:", line.plain)
 
-    def test_peer_diagram_horizontal(self):
+    def test_peer_network_diagram(self):
         spans = [
             {
                 "source_agent": "a",
@@ -93,12 +93,28 @@ class LiveFormatTests(unittest.TestCase):
                 "direction": "send",
                 "enqueued_at": 0,
                 "acked_at": 50,
-            }
+            },
+            {
+                "source_agent": "b",
+                "dest_agent": "a",
+                "payload_summary": "Hi Alice!",
+                "payload_type": "Reply",
+                "state": "delivered",
+                "direction": "send",
+                "enqueued_at": 60,
+                "acked_at": 80,
+            },
         ]
-        diagram = build_peer_diagram(spans, {"a": "Alice", "b": "Bob"})
-        self.assertIn('Alice: "Hi Bob!"', diagram.plain)
-        self.assertIn("50ms", diagram.plain)
-        self.assertIn("─", diagram.plain)
+        diagram = build_peer_network_diagram(spans, {"a": "Alice", "b": "Bob"})
+        text = diagram.plain
+        self.assertIn("Alice", text)
+        self.assertIn("Bob", text)
+        self.assertIn("┌", text)
+        self.assertIn("Route", text)
+        self.assertIn("out", text)
+        self.assertIn("in", text)
+        self.assertIn("50ms", text)
+        self.assertNotIn("Request (", text)
 
     def test_hub_diagram_orchestrator_fanout(self):
         spans = [
