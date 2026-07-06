@@ -14,7 +14,17 @@ from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Footer, Header, RichLog, Static
 
 from .cli import display_name
-from .network_canvas import ERROR, SUCCESS, WARN, format_ms
+from .network_canvas import (
+    ERROR,
+    SUCCESS,
+    WARN,
+    assemble_centered_diagram,
+    build_diagram_legend,
+    build_hub_topology,
+    build_peer_topology,
+    center_in_width,
+    format_ms,
+)
 from .shape import HUB, TreeNode, build_hub_legs, build_interaction_tree, classify_trace_shape
 from .store import get_alias_map, get_recent_spans, get_trace_spans, save_watch_config
 from .wizard import WatchSetup, ViewMode
@@ -235,32 +245,50 @@ def build_hub_detail_summary(
 
 
 
-def _hstack_blocks(blocks: list[list[str]], gap: str = "  ") -> list[str]:
-    if not blocks:
-        return []
-    height = max(len(b) for b in blocks)
-    widths = [max(len(line) for line in b) for b in blocks]
-    padded = []
-    for block, w in zip(blocks, widths):
-        rows = block + [" " * w] * (height - len(block))
-        padded.append([line.ljust(w) for line in rows])
-    merged: list[str] = []
-    for row_idx in range(height):
-        parts = [padded[i][row_idx] for i in range(len(blocks))]
-        merged.append(gap.join(parts))
-    return merged
+def build_hub_network_diagram(
+    spans: list[dict[str, Any]],
+    hub: str,
+    alias_map: dict[str, str],
+    *,
+    pulse: bool = False,
+) -> Text:
+    """Hub topology + leg summary table."""
+    legs = build_hub_legs(spans, hub)
+    orch_name = display_name(hub, alias_map)
+    agent_names = [display_name(leg["subagent"], alias_map) for leg in legs]
+    topology = build_hub_topology(legs, orch_name, agent_names, pulse=pulse)
+    if not legs:
+        return topology
+    table = build_hub_leg_table(legs, agent_names)
+    legend = build_diagram_legend()
+    return assemble_centered_diagram(topology, table, legend)
 
 
-def _hop_arrow_block(icon: str, latency: str) -> list[str]:
-    mid = f"{icon} {latency}".strip()
-    return ["", f"─ {mid} ─▶", ""]
+def _latest_peer_round_trip(
+    sends: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Most recent Message send and matching Reply (if any)."""
+    if not sends:
+        return None, None
+    if len(sends) >= 2:
+        prev, latest = sends[-2], sends[-1]
+        if (
+            prev["source_agent"] == latest["dest_agent"]
+            and prev["dest_agent"] == latest["source_agent"]
+            and message_label(prev) == "Message"
+            and message_label(latest) == "Reply"
+        ):
+            return prev, latest
+    return sends[-1], None
 
 
-def build_peer_diagram(
+def build_peer_network_diagram(
     sends: list[dict[str, Any]],
     alias_map: dict[str, str],
+    *,
+    pulse: bool = False,
 ) -> Text:
-    """Horizontal hop rows stacked vertically — scroll for full trace history."""
+    """Two-agent bidirectional network view for the latest hop pair."""
     if not sends:
         return Text(
             "  Waiting for messages…\n\n"
@@ -269,42 +297,35 @@ def build_peer_diagram(
             style="dim",
         )
 
-    diagram = Text()
-    pad = "  "
+    outbound, reply = _latest_peer_round_trip(sends)
+    if outbound is None:
+        return Text("  Waiting for messages…", style="dim")
 
-    for i, span in enumerate(sends):
-        if i > 0:
-            diagram.append("\n\n")
+    left = display_name(outbound["source_agent"], alias_map)
+    right = display_name(outbound["dest_agent"], alias_map)
+    state = outbound.get("state", "pending")
+    leg_state = "completed" if state == "delivered" and reply else ("failed" if state in ("dropped", "timeout") else "pending")
 
-        src = display_name(span["source_agent"], alias_map)
-        dst = display_name(span["dest_agent"], alias_map)
-        body = _message_text(span)
-        label = message_label(span)
-        latency = format_latency(span)
-        state = span.get("state", "pending")
-        icon = STATE_ICON.get(state, "·")
+    def _lat(span: dict[str, Any] | None) -> int | None:
+        if not span or span.get("acked_at") is None:
+            return None
+        return max(span["acked_at"] - span["enqueued_at"], 0)
 
-        sender_label = f'{src}: "{body}"' if body else f"{src} ({label})"
-        src_box = render_agent_box(sender_label)
-        arrow = _hop_arrow_block(icon, latency)
-        dst_box = render_agent_box(dst)
-
-        row_lines = _hstack_blocks([src_box, arrow, dst_box])
-        for line in row_lines:
-            diagram.append(pad)
-            if icon in line and state in STATE_STYLE:
-                before, _, after = line.partition(icon)
-                diagram.append(before)
-                diagram.append_text(_styled_icon(state))
-                diagram.append(after)
-            else:
-                diagram.append(line, style=STATE_STYLE.get(state, "white"))
-            diagram.append("\n")
-
-    if diagram.plain.endswith("\n"):
-        diagram.plain = diagram.plain.rstrip("\n")
-
-    return diagram
+    diagram = build_peer_topology(
+        left,
+        right,
+        state=leg_state,
+        pulse=pulse,
+    )
+    table = build_peer_leg_table(
+        left,
+        right,
+        message_ms=_lat(outbound),
+        reply_ms=_lat(reply) if reply else None,
+        state=leg_state,
+    )
+    legend = build_diagram_legend()
+    return assemble_centered_diagram(diagram, table, legend)
 
 
 def _format_ms(ms: int | None) -> str:
