@@ -3,9 +3,11 @@ import unittest
 from uagents import Model
 
 from uagents_trace.live import (
-    build_hub_diagram,
+    build_hub_detail_summary,
+    build_hub_leg_table,
+    build_hub_network_diagram,
     build_hub_tree_diagram,
-    build_peer_diagram,
+    build_peer_network_diagram,
     format_event_line,
     format_latency,
     message_label,
