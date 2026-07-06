@@ -35,7 +35,6 @@ POLL_SECONDS = 3.0
 # Pending-indicator blink — slower than poll so the diagram is not constantly redrawing.
 PULSE_SECONDS = 1.5
 MAX_EVENTS = 15
-MAX_EVENTS = 15
 MAX_TRACE_LIST = 25
 TRACE_WIDGET_PREFIX = "trace-"
 
@@ -49,7 +48,6 @@ def _trace_id_from_widget_id(widget_id: str) -> str:
     if widget_id.startswith(TRACE_WIDGET_PREFIX):
         return widget_id[len(TRACE_WIDGET_PREFIX) :]
     return widget_id
-
 
 REPLY_PAYLOAD_TYPES = frozenset(
     {
@@ -263,7 +261,6 @@ def build_hub_detail_summary(
     return "  ·  ".join(parts)
 
 
-
 def build_hub_network_diagram(
     spans: list[dict[str, Any]],
     hub: str,
@@ -435,10 +432,6 @@ def _span_in_watch(span: dict[str, Any], addresses: set[str] | None) -> bool:
     if not addresses:
         return True
     return span["source_agent"] in addresses or span["dest_agent"] in addresses
-
-
-def _is_send_event(span: dict[str, Any]) -> bool:
-    return span.get("direction") == "send" or span.get("direction") is None
 
 
 class LiveApp(App):
