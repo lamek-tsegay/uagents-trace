@@ -116,7 +116,7 @@ class LiveFormatTests(unittest.TestCase):
         self.assertIn("50ms", text)
         self.assertNotIn("Request (", text)
 
-    def test_hub_diagram_orchestrator_fanout(self):
+    def test_hub_network_diagram_fanout(self):
         spans = [
             {
                 "source_agent": "orch",
@@ -160,13 +160,19 @@ class LiveFormatTests(unittest.TestCase):
             },
         ]
         aliases = {"orch": "Orchestrator", "sub1": "SubAgent1", "sub2": "SubAgent2"}
-        diagram = build_hub_diagram(spans, "orch", aliases)
+        diagram = build_hub_network_diagram(spans, "orch", aliases)
         text = diagram.plain
         self.assertIn("Orchestrator", text)
         self.assertIn("SubAgent1", text)
         self.assertIn("SubAgent2", text)
-        self.assertIn("success", text)
-        self.assertNotIn("◀", text)
+        self.assertIn("┌", text)
+        self.assertIn("orchestrator", text)
+        self.assertIn("Agent", text)
+        self.assertIn("Out", text)
+        self.assertIn("In", text)
+        self.assertIn("Total", text)
+        self.assertIn("3ms", text)
+        self.assertNotIn("Request (", text)
 
     def test_hub_tree_diagram_fan_out(self):
         spans = [
