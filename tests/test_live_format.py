@@ -174,6 +174,30 @@ class LiveFormatTests(unittest.TestCase):
         self.assertIn("3ms", text)
         self.assertNotIn("Request (", text)
 
+    def test_hub_leg_table_columns(self):
+        legs = [
+            {
+                "subagent": "sub1",
+                "dispatch_ms": 30,
+                "reply_ms": 15,
+                "latency_ms": 45,
+                "state": "completed",
+            },
+            {
+                "subagent": "sub2",
+                "dispatch_ms": 25,
+                "state": "pending",
+            },
+        ]
+        table = build_hub_leg_table(legs, ["Bob", "John"])
+        text = table.plain
+        self.assertIn("Bob", text)
+        self.assertIn("John", text)
+        self.assertIn("30ms", text)
+        self.assertIn("15ms", text)
+        self.assertIn("45ms", text)
+        self.assertIn("⋯ waiting", text)
+
     def test_hub_tree_diagram_fan_out(self):
         spans = [
             {
