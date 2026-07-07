@@ -198,6 +198,16 @@ class LiveFormatTests(unittest.TestCase):
         self.assertIn("45ms", text)
         self.assertIn("⋯ waiting", text)
 
+    def test_hub_detail_summary(self):
+        legs = [
+            {"subagent": "sub1", "state": "completed", "latency_ms": 45},
+            {"subagent": "sub2", "state": "pending"},
+        ]
+        summary = build_hub_detail_summary("Alice", legs, ["Bob", "John"], "abc12345-dead")
+        self.assertIn("Alice dispatched to Bob, John", summary)
+        self.assertIn("1/2 complete", summary)
+        self.assertIn("45ms max", summary)
+
     def test_hub_tree_diagram_fan_out(self):
         spans = [
             {
