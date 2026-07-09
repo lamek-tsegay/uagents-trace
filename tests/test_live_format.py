@@ -9,17 +9,48 @@ from uagents_trace.live import (
     build_hub_tree_diagram,
     build_peer_network_diagram,
     format_event_line,
-    format_latency,
     message_label,
     render_agent_box,
+    sidebar_label,
 )
+from uagents_trace.network_canvas import format_ms
 from uagents_trace.recorder import payload_summary
-from uagents_trace.shape import build_interaction_tree
+from uagents_trace.shape import build_hops, build_interaction_tree, build_trace_state
 
 
 class Hello(Model):
     text: str
     count: int
+
+
+def span(
+    source,
+    dest,
+    payload_type="Hello",
+    payload_summary=None,
+    state="delivered",
+    direction="send",
+    enqueued_at=0,
+    acked_at=None,
+    error=None,
+    span_id=None,
+):
+    return {
+        "id": span_id or f"{source}-{dest}-{payload_type}-{direction}-{enqueued_at}",
+        "source_agent": source,
+        "dest_agent": dest,
+        "payload_type": payload_type,
+        "payload_summary": payload_summary,
+        "protocol": None,
+        "detail": None,
+        "state": state,
+        "direction": direction,
+        "enqueued_at": enqueued_at,
+        "acked_at": acked_at,
+        "error": error,
+        "source_registered": None,
+        "dest_registered": None,
+    }
 
 
 class PayloadSummaryTests(unittest.TestCase):
@@ -29,83 +60,69 @@ class PayloadSummaryTests(unittest.TestCase):
 
 class MessageLabelTests(unittest.TestCase):
     def test_hello_is_message(self):
-        self.assertEqual(message_label({"payload_type": "Hello"}), "Message")
+        self.assertEqual(message_label("Hello"), "Message")
 
     def test_reply_is_reply(self):
-        self.assertEqual(message_label({"payload_type": "Reply"}), "Reply")
+        self.assertEqual(message_label("Reply"), "Reply")
 
     def test_pong_is_reply(self):
-        self.assertEqual(message_label({"payload_type": "Pong"}), "Reply")
+        self.assertEqual(message_label("Pong"), "Reply")
+
+
+class FormatMsTests(unittest.TestCase):
+    def test_format_latency_ms(self):
+        self.assertEqual(format_ms(45), "45ms")
+
+    def test_format_latency_seconds(self):
+        self.assertEqual(format_ms(1500), "1.50s")
+
+    def test_format_latency_none(self):
+        self.assertEqual(format_ms(None), "…")
 
 
 class LiveFormatTests(unittest.TestCase):
-    def test_format_latency_ms(self):
-        span = {"enqueued_at": 1000, "acked_at": 1045}
-        self.assertEqual(format_latency(span), "45ms")
-
-    def test_format_latency_seconds(self):
-        span = {"enqueued_at": 0, "acked_at": 1500}
-        self.assertEqual(format_latency(span), "1.50s")
-
     def test_agent_box_with_message(self):
         lines = render_agent_box('Alice: "Hi Bob!"')
         self.assertIn('Alice: "Hi Bob!"', lines[1])
 
     def test_event_line_uses_message_label(self):
-        span = {
-            "source_agent": "a",
-            "dest_agent": "b",
-            "payload_summary": "Hi Bob!",
-            "payload_type": "Hello",
-            "state": "delivered",
-            "direction": "send",
-            "enqueued_at": 0,
-            "acked_at": 50,
-        }
-        line = format_event_line(span, {"a": "Alice", "b": "Bob"})
+        spans = [
+            span("a", "b", payload_type="Hello", payload_summary="Hi Bob!", enqueued_at=0, acked_at=50),
+        ]
+        hop = build_hops(spans)[0]
+        line = format_event_line(hop, {"a": "Alice", "b": "Bob"})
         self.assertIn("Message:", line.plain)
         self.assertIn("Hi Bob!", line.plain)
         self.assertIn("→", line.plain)
         self.assertNotIn("◀", line.plain)
 
     def test_event_line_reply_label(self):
-        span = {
-            "source_agent": "b",
-            "dest_agent": "a",
-            "payload_summary": "Hi Alice!",
-            "payload_type": "Reply",
-            "state": "delivered",
-            "direction": "send",
-            "enqueued_at": 0,
-            "acked_at": 50,
-        }
-        line = format_event_line(span, {"a": "Alice", "b": "Bob"})
+        spans = [
+            span("b", "a", payload_type="Reply", payload_summary="Hi Alice!", enqueued_at=0, acked_at=50),
+        ]
+        hop = build_hops(spans)[0]
+        line = format_event_line(hop, {"a": "Alice", "b": "Bob"})
         self.assertIn("Reply:", line.plain)
+
+    def test_event_line_dedupes_send_receive_twins(self):
+        # traced_send's send-side span and @trace's receive-side span
+        # describe the same logical hop -- build_hops must collapse them
+        # into one entry, not one line per span.
+        spans = [
+            span("a", "b", payload_type="Hello", payload_summary="Hi Bob!", direction="send", enqueued_at=0, acked_at=10),
+            span("a", "b", payload_type="Hello", payload_summary="Hi Bob!", direction="receive", enqueued_at=10, acked_at=75),
+        ]
+        hops = build_hops(spans)
+        self.assertEqual(len(hops), 1)
+        self.assertEqual(hops[0].latency_ms, 75)  # full hop: send enqueue -> receive ack
 
     def test_peer_network_diagram(self):
         spans = [
-            {
-                "source_agent": "a",
-                "dest_agent": "b",
-                "payload_summary": "Hi Bob!",
-                "payload_type": "Hello",
-                "state": "delivered",
-                "direction": "send",
-                "enqueued_at": 0,
-                "acked_at": 50,
-            },
-            {
-                "source_agent": "b",
-                "dest_agent": "a",
-                "payload_summary": "Hi Alice!",
-                "payload_type": "Reply",
-                "state": "delivered",
-                "direction": "send",
-                "enqueued_at": 60,
-                "acked_at": 80,
-            },
+            span("a", "b", payload_type="Hello", payload_summary="Hi Bob!", enqueued_at=0, acked_at=50),
+            span("b", "a", payload_type="Reply", payload_summary="Hi Alice!", enqueued_at=60, acked_at=80),
         ]
-        diagram = build_peer_network_diagram(spans, {"a": "Alice", "b": "Bob"})
+        hops = build_hops(spans)
+        diagram = build_peer_network_diagram(hops, {"a": "Alice", "b": "Bob"})
         text = diagram.plain
         self.assertIn("Alice", text)
         self.assertIn("Bob", text)
@@ -118,49 +135,14 @@ class LiveFormatTests(unittest.TestCase):
 
     def test_hub_network_diagram_fanout(self):
         spans = [
-            {
-                "source_agent": "orch",
-                "dest_agent": "sub1",
-                "payload_type": "Hello",
-                "payload_summary": "Hi Bob!",
-                "state": "delivered",
-                "direction": "send",
-                "enqueued_at": 0,
-                "acked_at": 3,
-            },
-            {
-                "source_agent": "sub1",
-                "dest_agent": "orch",
-                "payload_type": "Reply",
-                "payload_summary": "done",
-                "state": "delivered",
-                "direction": "send",
-                "enqueued_at": 10,
-                "acked_at": 20,
-            },
-            {
-                "source_agent": "orch",
-                "dest_agent": "sub2",
-                "payload_type": "Hello",
-                "payload_summary": "Hi John!",
-                "state": "delivered",
-                "direction": "send",
-                "enqueued_at": 0,
-                "acked_at": 4,
-            },
-            {
-                "source_agent": "sub2",
-                "dest_agent": "orch",
-                "payload_type": "Reply",
-                "payload_summary": "done",
-                "state": "delivered",
-                "direction": "send",
-                "enqueued_at": 12,
-                "acked_at": 22,
-            },
+            span("orch", "sub1", payload_type="Hello", payload_summary="Hi Bob!", enqueued_at=0, acked_at=3),
+            span("sub1", "orch", payload_type="Reply", payload_summary="done", enqueued_at=10, acked_at=20),
+            span("orch", "sub2", payload_type="Hello", payload_summary="Hi John!", enqueued_at=0, acked_at=4),
+            span("sub2", "orch", payload_type="Reply", payload_summary="done", enqueued_at=12, acked_at=22),
         ]
         aliases = {"orch": "Orchestrator", "sub1": "SubAgent1", "sub2": "SubAgent2"}
-        diagram = build_hub_network_diagram(spans, "orch", aliases)
+        state = build_trace_state(spans, hub_hint="orch")
+        diagram = build_hub_network_diagram(state, aliases)
         text = diagram.plain
         self.assertIn("Orchestrator", text)
         self.assertIn("SubAgent1", text)
@@ -173,6 +155,34 @@ class LiveFormatTests(unittest.TestCase):
         self.assertIn("Total", text)
         self.assertIn("3ms", text)
         self.assertNotIn("Request (", text)
+
+    def test_hub_network_diagram_failed_leg_hides_misleading_out(self):
+        # A failed leg's dispatch_ms is time-to-failure, not outbound
+        # latency -- it must not appear under Out, and the failure
+        # duration should be visible next to the status instead.
+        spans = [
+            span("orch", "sub1", payload_type="Hello", enqueued_at=0, acked_at=3),
+            span("sub1", "orch", payload_type="Reply", enqueued_at=10, acked_at=20),
+            span(
+                "orch",
+                "sub2",
+                payload_type="Hello",
+                state="dropped",
+                error="Unable to resolve destination endpoint",
+                enqueued_at=0,
+                acked_at=698,
+            ),
+        ]
+        aliases = {"orch": "Orchestrator", "sub1": "SubAgent1", "sub2": "SubAgent2"}
+        state = build_trace_state(spans, hub_hint="orch")
+        diagram = build_hub_network_diagram(state, aliases)
+        text = diagram.plain
+        self.assertIn("698ms", text)  # failure duration surfaces near the status...
+        table_and_after = text.split("Agent", 1)[1]
+        # ...but never under the Out column: SubAgent2's row shows "—", not 698ms.
+        sub2_row_start = table_and_after.index("SubAgent2")
+        sub2_row = table_and_after[sub2_row_start : sub2_row_start + 60]
+        self.assertNotIn("698ms", sub2_row.split("✗")[0])
 
     def test_hub_leg_table_columns(self):
         legs = [
@@ -198,6 +208,18 @@ class LiveFormatTests(unittest.TestCase):
         self.assertIn("45ms", text)
         self.assertIn("⋯ waiting", text)
 
+    def test_hub_leg_table_failed_leg_omits_out_shows_failure_time(self):
+        legs = [
+            {"subagent": "sub4", "dispatch_ms": 723, "state": "failed", "reason": "Unable to resolve destination endpoint"},
+        ]
+        table = build_hub_leg_table(legs, ["SubAgent4"])
+        text = table.plain
+        self.assertIn("✗ failed 723ms", text)
+        # The Out column itself must read as unknown/failed, not "723ms".
+        row_line = next(line for line in text.splitlines() if "SubAgent4" in line)
+        out_field = row_line[len("SubAgent4"):].strip().split()[0]
+        self.assertEqual(out_field, "—")
+
     def test_hub_detail_summary(self):
         legs = [
             {"subagent": "sub1", "state": "completed", "latency_ms": 45},
@@ -210,36 +232,9 @@ class LiveFormatTests(unittest.TestCase):
 
     def test_hub_tree_diagram_fan_out(self):
         spans = [
-            {
-                "source_agent": "orch",
-                "dest_agent": "sub1",
-                "payload_type": "Hello",
-                "payload_summary": "Hi Bob!",
-                "state": "delivered",
-                "direction": "send",
-                "enqueued_at": 0,
-                "acked_at": 3,
-            },
-            {
-                "source_agent": "sub1",
-                "dest_agent": "orch",
-                "payload_type": "Reply",
-                "payload_summary": "done",
-                "state": "delivered",
-                "direction": "send",
-                "enqueued_at": 10,
-                "acked_at": 20,
-            },
-            {
-                "source_agent": "orch",
-                "dest_agent": "sub2",
-                "payload_type": "Hello",
-                "payload_summary": "Hi John!",
-                "state": "delivered",
-                "direction": "send",
-                "enqueued_at": 0,
-                "acked_at": 4,
-            },
+            span("orch", "sub1", payload_type="Hello", payload_summary="Hi Bob!", enqueued_at=0, acked_at=3),
+            span("sub1", "orch", payload_type="Reply", payload_summary="done", enqueued_at=10, acked_at=20),
+            span("orch", "sub2", payload_type="Hello", payload_summary="Hi John!", enqueued_at=0, acked_at=4),
         ]
         aliases = {"orch": "Orchestrator", "sub1": "SubAgent1", "sub2": "SubAgent2"}
         tree = build_interaction_tree(spans, "orch")
@@ -249,6 +244,44 @@ class LiveFormatTests(unittest.TestCase):
         self.assertIn("SubAgent1", text)
         self.assertIn("SubAgent2", text)
         self.assertIn("├──", text)
+
+
+class SidebarLabelTests(unittest.TestCase):
+    def test_hub_trace_shows_fractional_rollup_not_binary_failure(self):
+        # The orchestrator_fanout demo shape: 3 legs complete, 1 fails --
+        # the sidebar must say "3/4", not flip to an all-or-nothing FAILURE.
+        spans = [
+            span("orch", "sub1", payload_type="Task", enqueued_at=0, acked_at=10),
+            span("sub1", "orch", payload_type="Result", enqueued_at=10, acked_at=20),
+            span("orch", "sub2", payload_type="Task", enqueued_at=0, acked_at=10),
+            span("sub2", "orch", payload_type="Result", enqueued_at=10, acked_at=20),
+            span("orch", "sub3", payload_type="Task", enqueued_at=0, acked_at=10),
+            span("sub3", "orch", payload_type="Result", enqueued_at=10, acked_at=20),
+            span(
+                "orch",
+                "sub4",
+                payload_type="Task",
+                state="dropped",
+                error="Unable to resolve destination endpoint",
+                enqueued_at=0,
+                acked_at=700,
+            ),
+        ]
+        state = build_trace_state(spans, hub_hint="orch")
+        label, style = sidebar_label("1ffa482a-dead-beef", state, {"orch": "Orchestrator"})
+        self.assertIn("Orchestrator→4", label)
+        self.assertIn("3/4 ✓", label)
+        self.assertNotIn("FAILURE", label)
+
+    def test_peer_trace_label(self):
+        spans = [
+            span("a", "b", payload_type="Hello", enqueued_at=0, acked_at=10),
+            span("b", "a", payload_type="Reply", enqueued_at=10, acked_at=20),
+        ]
+        state = build_trace_state(spans)
+        label, style = sidebar_label("abc12345", state, {"a": "Alice", "b": "Bob"})
+        self.assertIn("Alice↔Bob", label)
+        self.assertIn("2/2 ✓", label)
 
 
 if __name__ == "__main__":
