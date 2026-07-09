@@ -17,7 +17,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Footer, Header, Label, ListItem, ListView, RichLog, Sparkline, Static
+from textual.widgets import Footer, Header, Label, ListItem, ListView, RichLog, Static
 
 from .cli import display_name
 from .network_canvas import (
@@ -43,7 +43,6 @@ POLL_SECONDS = 3.0
 PULSE_SECONDS = 1.5
 MAX_EVENTS = 15
 MAX_TRACE_LIST = 25
-MAX_LATENCY_HISTORY = 30
 TRACE_WIDGET_PREFIX = "trace-"
 
 MUTED = "#6b7280"
@@ -506,20 +505,6 @@ class LiveApp(App):
         color: #6b7280;
         background: #0a0f0d;
     }
-    #sparkline-row {
-        height: 3;
-        padding: 0 2;
-        background: #0a0f0d;
-    }
-    #sparkline-label {
-        width: 16;
-        color: #6b7280;
-        content-align: left middle;
-    }
-    #latency-sparkline {
-        width: 1fr;
-        color: #34d399;
-    }
     #events-header {
         height: 1;
         padding: 0 2;
@@ -555,7 +540,6 @@ class LiveApp(App):
         self._span_states: dict[str, str] = {}
         self._logged_hop_ids: set[str] = set()
         self._events: deque[Text] = deque(maxlen=MAX_EVENTS)
-        self._latency_history: deque[float] = deque(maxlen=MAX_LATENCY_HISTORY)
         self._active_trace_id: str | None = None
         self._trace_ids: list[str] = []
         self._trace_rollup_cache: dict[str, TraceState] = {}
@@ -584,9 +568,6 @@ class LiveApp(App):
                 with Vertical(id="diagram-col"):
                     yield Static("", id="diagram-content")
             yield Static("", id="detail-bar")
-            with Horizontal(id="sparkline-row"):
-                yield Static("Latency", id="sparkline-label")
-                yield Sparkline([], id="latency-sparkline", summary_function=max)
             yield Static("Live messages", id="events-header")
             yield RichLog(id="events-panel", highlight=False, markup=False, auto_scroll=True)
         yield Footer()
@@ -681,16 +662,8 @@ class LiveApp(App):
             line = format_event_line(hop, self._alias_map)
             self._events.append(line)
             events_log.write(line)
-            if hop.state == "delivered" and hop.latency_ms is not None:
-                self._latency_history.append(hop.latency_ms)
             appended = True
 
-        if appended:
-            try:
-                sparkline = self.query_one("#latency-sparkline", Sparkline)
-                sparkline.data = list(self._latency_history)
-            except Exception:
-                pass
         return appended
 
     async def _reload_feed_for_active_trace(self) -> None:
