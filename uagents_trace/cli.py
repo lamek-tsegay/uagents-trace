@@ -20,7 +20,16 @@ from rich.console import Console
 from rich.table import Table
 
 from .protocols import build_payment_steps, is_payment_trace
-from .shape import HUB, MULTI_LEVEL, TreeNode, build_hub_legs, build_interaction_tree, classify_trace_shape
+from .shape import (
+    HUB,
+    MULTI_LEVEL,
+    Hop,
+    TreeNode,
+    build_hops,
+    build_hub_legs,
+    build_interaction_tree,
+    classify_trace_shape,
+)
 from .store import (
     default_db_path,
     get_alias_map,
@@ -83,18 +92,18 @@ def reg_label(v: Optional[bool]) -> str:
     return "unknown"
 
 
-def explain_failure(span: dict[str, Any]) -> list[str]:
-    if span["dest_registered"] is False:
+def explain_failure(hop: Hop) -> list[str]:
+    if hop.dest_registered is False:
         cause = "likely cause: destination is not registered/reachable"
-    elif span["dest_registered"] is True:
+    elif hop.dest_registered is True:
         cause = "destination appears registered -- failed for another reason"
     else:
         cause = "destination registration status is unknown"
     return [
         cause,
-        f"error: {span['error'] or '(no error message)'}",
-        f"source registered: {reg_label(span['source_registered'])}"
-        f"  ·  dest registered: {reg_label(span['dest_registered'])}",
+        f"error: {hop.error or '(no error message)'}",
+        f"source registered: {reg_label(hop.source_registered)}"
+        f"  ·  dest registered: {reg_label(hop.dest_registered)}",
     ]
 
 
@@ -102,34 +111,35 @@ def fmt_duration(ms: int) -> str:
     return f"{ms / 1000:.2f}s" if ms >= 1000 else f"{ms} ms"
 
 
-def print_flat_spans(spans: list[dict[str, Any]], alias_map: dict[str, str], color: bool) -> None:
-    """One block per span: a timing bar, latency, state, and -- for
-    failures -- the likely cause. Used for peer (two-agent) traces and as
-    the fallback for any trace shape not recognized as peer or hub.
+def print_flat_spans(hops: list[Hop], alias_map: dict[str, str], color: bool) -> None:
+    """One block per logical hop (send+receive twins already merged -- see
+    `shape.build_hops`): a timing bar, latency, state, and -- for failures
+    -- the likely cause. Used for peer (two-agent) traces and as the
+    fallback for any trace shape not recognized as peer or hub.
     """
-    start = min(s["enqueued_at"] for s in spans)
-    end = max(s["acked_at"] or s["enqueued_at"] for s in spans)
+    start = min(h.enqueued_at for h in hops)
+    end = max(h.acked_at or h.enqueued_at for h in hops)
     span_ms = max(end - start, 1)
 
-    for s in spans:
-        latency_ms = (s["acked_at"] - s["enqueued_at"]) if s["acked_at"] is not None else None
-        left = int(((s["enqueued_at"] - start) / span_ms) * BAR_WIDTH)
+    for h in hops:
+        latency_ms = h.latency_ms
+        left = int(((h.enqueued_at - start) / span_ms) * BAR_WIDTH)
         width = max(1, int((latency_ms / span_ms) * BAR_WIDTH)) if latency_ms is not None else 2
         bar = (" " * left + "#" * width).ljust(BAR_WIDTH)
-        bar = colorize(bar, ANSI.get(s["state"], "37"), color)
+        bar = colorize(bar, ANSI.get(h.state, "37"), color)
 
-        src = display_name(s["source_agent"], alias_map)
-        dst = display_name(s["dest_agent"], alias_map)
-        tag = f"[{s['protocol']}] " if s.get("protocol") else ""
-        label = f"{src} -> {dst}  {tag}{s['payload_type']}"
+        src = display_name(h.source, alias_map)
+        dst = display_name(h.dest, alias_map)
+        tag = f"[{h.protocol}] " if h.protocol else ""
+        label = f"{src} -> {dst}  {tag}{h.payload_type}"
         latency_label = f"{latency_ms} ms" if latency_ms is not None else "pending…"
         print(f"{label:<42} {latency_label:>10}")
-        print(f"  [{bar}]  {s['state']}")
+        print(f"  [{bar}]  {h.state}")
 
-        if s["state"] in ("dropped", "timeout"):
-            tag = colorize(s["state"].upper(), ANSI[s["state"]], color)
+        if h.state in ("dropped", "timeout"):
+            tag = colorize(h.state.upper(), ANSI[h.state], color)
             print(f"  {tag}")
-            for line in explain_failure(s):
+            for line in explain_failure(h):
                 print(f"    {line}")
         print()
 
@@ -356,7 +366,7 @@ async def print_trace_detail(
     else:
         if shape == MULTI_LEVEL:
             print("(multi-level trace, showing flat view)\n")
-        print_flat_spans(spans, alias_map, color)
+        print_flat_spans(build_hops(spans), alias_map, color)
 
 
 async def cmd_show(args: argparse.Namespace) -> None:
