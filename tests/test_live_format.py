@@ -3,6 +3,8 @@ import unittest
 from uagents import Model
 
 from uagents_trace.live import (
+    MUTED,
+    _sidebar_markup,
     build_hub_detail_summary,
     build_hub_leg_table,
     build_hub_network_diagram,
@@ -13,7 +15,7 @@ from uagents_trace.live import (
     render_agent_box,
     sidebar_label,
 )
-from uagents_trace.network_canvas import format_ms
+from uagents_trace.network_canvas import ERROR, SUCCESS, WARN, format_ms
 from uagents_trace.recorder import payload_summary
 from uagents_trace.shape import build_hops, build_interaction_tree, build_trace_state
 
@@ -272,6 +274,8 @@ class SidebarLabelTests(unittest.TestCase):
         self.assertIn("Orchestrator→4", label)
         self.assertIn("3/4 ✓", label)
         self.assertNotIn("FAILURE", label)
+        # 3/4 succeeded -- this must NOT read as a total failure (red).
+        self.assertEqual(style, WARN)
 
     def test_peer_trace_label(self):
         spans = [
@@ -282,6 +286,36 @@ class SidebarLabelTests(unittest.TestCase):
         label, style = sidebar_label("abc12345", state, {"a": "Alice", "b": "Bob"})
         self.assertIn("Alice↔Bob", label)
         self.assertIn("2/2 ✓", label)
+        self.assertEqual(style, SUCCESS)
+
+    def test_fully_failed_hub_trace_is_red(self):
+        # Every leg failed -- this is the only case red should apply to.
+        spans = [
+            span(
+                "orch", f"sub{i}", payload_type="Task", state="dropped",
+                error="Unable to resolve destination endpoint", enqueued_at=0, acked_at=700,
+            )
+            for i in range(1, 5)
+        ]
+        state = build_trace_state(spans, hub_hint="orch")
+        label, style = sidebar_label("deadbeef", state, {"orch": "Orchestrator"})
+        self.assertEqual(style, ERROR)
+
+    def test_pending_trace_is_amber_not_red(self):
+        # Nothing has failed yet, but it's not fully resolved either --
+        # amber ("in progress"), not red and not green.
+        spans = [span("orch", "sub1", payload_type="Task", state="pending", enqueued_at=0, acked_at=None)]
+        state = build_trace_state(spans, hub_hint="orch")
+        label, style = sidebar_label("deadbeef", state, {"orch": "Orchestrator"})
+        self.assertEqual(style, WARN)
+
+    def test_sidebar_markup_dims_trace_id_separately_from_status(self):
+        markup = _sidebar_markup("1ffa48 · Orchestrator→4 · 3/4 ✓ · 1.12s", WARN)
+        # The id segment is always neutral/dim...
+        self.assertIn(f"[{MUTED}]1ffa48[/]", markup)
+        # ...while the status-bearing remainder carries the semantic color,
+        # not a single flat style applied to the whole line.
+        self.assertIn(f"[{WARN}]Orchestrator→4 · 3/4 ✓ · 1.12s[/]", markup)
 
 
 if __name__ == "__main__":
