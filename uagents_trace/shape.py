@@ -270,3 +270,220 @@ def tree_node_to_dict(node: TreeNode) -> dict[str, Any]:
         "reason": node.reason,
         "children": [tree_node_to_dict(c) for c in node.children],
     }
+
+
+@dataclass
+class Hop:
+    """One logical message hop, deduplicated from its send/receive twin.
+
+    `traced_send` and `@trace` each write their own span for the same
+    logical hop -- the sender's send-side span (ack latency) and the
+    receiver's receive-side span (handler processing time). Any renderer
+    that lists "messages" (the live feed, `show`'s flat view, the TUI
+    waterfall) wants one entry per hop, not one per span, or a single
+    ping/pong exchange shows up as four lines instead of two.
+    """
+
+    id: str
+    source: str
+    dest: str
+    payload_type: str
+    message: str | None
+    protocol: str | None
+    detail: str | None
+    state: str  # delivered | dropped | timeout | pending
+    error: str | None
+    enqueued_at: int
+    acked_at: int | None
+    latency_ms: int | None
+    source_registered: bool | None = None
+    dest_registered: bool | None = None
+
+
+def _direction_of(span: dict[str, Any]) -> str:
+    return span.get("direction") or "send"
+
+
+def build_hops(spans: list[dict[str, Any]]) -> list[Hop]:
+    """Merge send/receive twins into one Hop per logical message, chronological.
+
+    Matches a "send" span to the earliest not-yet-claimed "receive" span
+    with the same (source, dest, payload_type) -- the two sides of one hop
+    always share that key. A send with no matching receive (a failed send
+    never arrives) becomes a hop on its own, using the send span's own
+    timing -- so a dropped/timeout hop's latency is genuinely "time to
+    failure", not a round trip.
+    """
+    sends = [s for s in spans if _direction_of(s) == "send"]
+    receives = [s for s in spans if _direction_of(s) == "receive"]
+    unclaimed_receives = sorted(range(len(receives)), key=lambda i: receives[i]["enqueued_at"])
+
+    hops: list[Hop] = []
+
+    for send in sends:
+        key = (send["source_agent"], send["dest_agent"], send["payload_type"])
+        match_idx = next(
+            (
+                i
+                for i in unclaimed_receives
+                if (receives[i]["source_agent"], receives[i]["dest_agent"], receives[i]["payload_type"]) == key
+            ),
+            None,
+        )
+        receive = None
+        if match_idx is not None:
+            unclaimed_receives.remove(match_idx)
+            receive = receives[match_idx]
+
+        if receive is not None and receive.get("state") == "delivered":
+            state = receive["state"]
+            acked_at = receive.get("acked_at")
+            error = receive.get("error")
+        else:
+            state = send["state"]
+            acked_at = send.get("acked_at")
+            error = send.get("error")
+
+        latency_ms = (acked_at - send["enqueued_at"]) if acked_at is not None else None
+
+        hops.append(
+            Hop(
+                id=send["id"],
+                source=send["source_agent"],
+                dest=send["dest_agent"],
+                payload_type=send["payload_type"],
+                message=send.get("payload_summary"),
+                protocol=send.get("protocol"),
+                detail=send.get("detail"),
+                state=state,
+                error=error,
+                enqueued_at=send["enqueued_at"],
+                acked_at=acked_at,
+                latency_ms=latency_ms,
+                source_registered=send.get("source_registered"),
+                dest_registered=send.get("dest_registered"),
+            )
+        )
+
+    # Receive spans with no send counterpart (e.g. a raw ctx.send that
+    # wasn't wrapped in traced_send, or older pre-migration data) still get
+    # a hop rather than being silently dropped.
+    for i in unclaimed_receives:
+        receive = receives[i]
+        acked_at = receive.get("acked_at")
+        hops.append(
+            Hop(
+                id=receive["id"],
+                source=receive["source_agent"],
+                dest=receive["dest_agent"],
+                payload_type=receive["payload_type"],
+                message=receive.get("payload_summary"),
+                protocol=receive.get("protocol"),
+                detail=receive.get("detail"),
+                state=receive["state"],
+                error=receive.get("error"),
+                enqueued_at=receive["enqueued_at"],
+                acked_at=acked_at,
+                latency_ms=(acked_at - receive["enqueued_at"]) if acked_at is not None else None,
+                source_registered=receive.get("source_registered"),
+                dest_registered=receive.get("dest_registered"),
+            )
+        )
+
+    hops.sort(key=lambda h: h.enqueued_at)
+    return hops
+
+
+def _bucket(state: str | None) -> str:
+    if state in ("completed", "delivered"):
+        return "completed"
+    if state in ("failed", "dropped", "timeout"):
+        return "failed"
+    return "pending"
+
+
+@dataclass
+class TraceState:
+    """Single computed view of one trace -- the one thing every renderer
+    (diagram, table, detail bar, feed, sidebar) should read from, so they
+    can't disagree about what happened. Alias-free and DB-free like the
+    rest of this module; callers apply display names and do I/O.
+    """
+
+    shape: str
+    hub: str | None
+    hops: list[Hop]
+    legs: list[dict[str, Any]]  # only meaningful when shape == HUB
+    tree: TreeNode | None  # only built when shape == HUB
+    participants: list[str]
+    started_at: int
+    duration_ms: int
+    completed: int
+    failed: int
+    pending: int
+    total: int
+
+
+def build_trace_state(spans: list[dict[str, Any]], hub_hint: str | None = None) -> TraceState:
+    """Build the one TraceState a live view renders from.
+
+    `hub_hint`, if given, unconditionally wins over auto-classification --
+    it lets a caller force hub-style rendering for a known orchestrator
+    address even before enough spans have arrived for
+    `classify_trace_shape` to infer it on its own. Callers decide *when*
+    to pass it (e.g. only once the watch setup has 3+ agents and a known
+    orchestrator); this function just applies it once given.
+    """
+    if not spans:
+        return TraceState(
+            shape=PEER,
+            hub=None,
+            hops=[],
+            legs=[],
+            tree=None,
+            participants=[],
+            started_at=0,
+            duration_ms=0,
+            completed=0,
+            failed=0,
+            pending=0,
+            total=0,
+        )
+
+    shape, detected_hub = classify_trace_shape(spans)
+    hub = hub_hint or detected_hub
+    if hub:
+        shape = HUB
+
+    hops = build_hops(spans)
+    legs = build_hub_legs(spans, hub) if hub else []
+    tree = build_interaction_tree(spans, hub) if hub else None
+
+    participants: list[str] = []
+    for s in spans:
+        for addr in (s["source_agent"], s["dest_agent"]):
+            if addr not in participants:
+                participants.append(addr)
+
+    started_at = min(s["enqueued_at"] for s in spans)
+    ended_at = max((s.get("acked_at") or s["enqueued_at"]) for s in spans)
+
+    units = legs if shape == HUB else [{"state": h.state} for h in hops]
+    completed = sum(1 for u in units if _bucket(u["state"]) == "completed")
+    failed = sum(1 for u in units if _bucket(u["state"]) == "failed")
+    pending = sum(1 for u in units if _bucket(u["state"]) == "pending")
+
+    return TraceState(
+        shape=shape,
+        hub=hub,
+        hops=hops,
+        legs=legs,
+        tree=tree,
+        participants=participants,
+        started_at=started_at,
+        duration_ms=max(ended_at - started_at, 0),
+        completed=completed,
+        failed=failed,
+        pending=pending,
+        total=len(units),
+    )
