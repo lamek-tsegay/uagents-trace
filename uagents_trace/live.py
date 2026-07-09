@@ -2,6 +2,12 @@
 
 Opened after the setup wizard. Polls SQLite and shows agent-to-agent
 messages as they happen — one active trace at a time, bounded feed.
+
+Every widget here (diagram, table, detail bar, feed, sidebar) renders from
+a single `shape.TraceState` computed once per refresh (see
+`shape.build_trace_state`) rather than each recomputing status/latency
+from raw spans on its own -- that's what keeps them from disagreeing about
+what happened to a given trace.
 """
 
 from collections import deque
@@ -11,7 +17,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Footer, Header, Label, ListItem, ListView, RichLog, Static
+from textual.widgets import Footer, Header, Label, ListItem, ListView, RichLog, Sparkline, Static
 
 from .cli import display_name
 from .network_canvas import (
@@ -22,12 +28,13 @@ from .network_canvas import (
     build_diagram_legend,
     build_hub_topology,
     build_peer_topology,
+    build_table_legend,
     center_in_width,
     format_ms,
 )
-from .shape import HUB, TreeNode, build_hub_legs, build_interaction_tree, classify_trace_shape
+from .shape import HUB, Hop, TraceState, TreeNode, build_hops, build_trace_state
 from .store import get_alias_map, get_recent_spans, get_trace_spans, list_traces, save_watch_config
-from .wizard import WatchSetup, ViewMode
+from .wizard import ViewMode, WatchSetup
 
 # Poll SQLite for new spans; 3s keeps the UI calm without feeling laggy for
 # typical multi-agent round trips (often seconds, not milliseconds).
@@ -36,7 +43,10 @@ POLL_SECONDS = 3.0
 PULSE_SECONDS = 1.5
 MAX_EVENTS = 15
 MAX_TRACE_LIST = 25
+MAX_LATENCY_HISTORY = 30
 TRACE_WIDGET_PREFIX = "trace-"
+
+MUTED = "#6b7280"
 
 
 def _trace_widget_id(trace_id: str) -> str:
@@ -48,6 +58,7 @@ def _trace_id_from_widget_id(widget_id: str) -> str:
     if widget_id.startswith(TRACE_WIDGET_PREFIX):
         return widget_id[len(TRACE_WIDGET_PREFIX) :]
     return widget_id
+
 
 REPLY_PAYLOAD_TYPES = frozenset(
     {
@@ -76,9 +87,9 @@ STATE_ICON = {
 }
 
 
-def message_label(span: dict[str, Any]) -> str:
+def message_label(payload_type: str) -> str:
     """Semantic label: Message for outbound, Reply for responses."""
-    ptype = span.get("payload_type") or ""
+    ptype = payload_type or ""
     if ptype in REPLY_PAYLOAD_TYPES:
         return "Reply"
     if ptype.endswith("Reply") or ptype.endswith("Acknowledgement"):
@@ -86,33 +97,20 @@ def message_label(span: dict[str, Any]) -> str:
     return "Message"
 
 
-def _message_text(span: dict[str, Any]) -> str:
-    summary = span.get("payload_summary")
-    if summary:
-        return summary
-    detail = span.get("detail")
-    if detail:
-        return detail
-    return span.get("payload_type") or ""
+def _message_text(hop: Hop) -> str:
+    if hop.message:
+        return hop.message
+    if hop.detail:
+        return hop.detail
+    return hop.payload_type or ""
 
 
-def _format_payload(span: dict[str, Any]) -> str:
-    label = message_label(span)
-    body = _message_text(span)
+def _format_payload(hop: Hop) -> str:
+    label = message_label(hop.payload_type)
+    body = _message_text(hop)
     if body:
         return f'{label}: "{body}"'
     return label
-
-
-def format_latency(span: dict[str, Any]) -> str:
-    ack = span.get("acked_at")
-    enq = span.get("enqueued_at")
-    if ack is None or enq is None:
-        return "…"
-    ms = max(ack - enq, 0)
-    if ms >= 1000:
-        return f"{ms / 1000:.2f}s"
-    return f"{ms}ms"
 
 
 def _styled_icon(state: str) -> Text:
@@ -121,20 +119,25 @@ def _styled_icon(state: str) -> Text:
     return Text(icon, style=f"bold {style}")
 
 
-def format_event_line(span: dict[str, Any], alias_map: dict[str, str]) -> Text:
-    """One send hop: [Alice] → [Bob]  Message: \"Hi Bob!\"  (12ms)"""
-    src = display_name(span["source_agent"], alias_map)
-    dst = display_name(span["dest_agent"], alias_map)
-    payload = _format_payload(span)
-    latency = format_latency(span)
-    state = span.get("state") or "pending"
+def format_event_line(hop: Hop, alias_map: dict[str, str]) -> Text:
+    """One logical hop: [Alice] → [Bob]  Message: \"Hi Bob!\"  (12ms)
+
+    `hop` is already deduplicated (see `shape.build_hops`) -- one line per
+    logical message, not one per underlying send/receive span, so a single
+    ping/pong round trip shows up as two feed lines, not four.
+    """
+    src = display_name(hop.source, alias_map)
+    dst = display_name(hop.dest, alias_map)
+    payload = _format_payload(hop)
+    latency = format_ms(hop.latency_ms)
+    state = hop.state or "pending"
 
     parts: list[Any] = [
         _styled_icon(state),
         f" [{src}] → [{dst}]  {payload}  ({latency})",
     ]
-    if state in ("dropped", "timeout") and span.get("error"):
-        parts.append(f"  — {span['error']}")
+    if state in ("dropped", "timeout") and hop.error:
+        parts.append(f"  — {hop.error}")
 
     line = Text.assemble(*parts)
     line.stylize(STATE_STYLE.get(state, "white"))
@@ -153,8 +156,15 @@ def render_agent_box(label: str, width: int | None = None) -> list[str]:
 
 
 def build_hub_leg_table(legs: list[dict[str, Any]], agent_names: list[str]) -> Text:
-    """Fixed-column summary of per-agent latencies and status."""
-    col_agent, col_out, col_in, col_total, col_status = 12, 8, 8, 8, 10
+    """Fixed-column summary of per-agent latencies and status.
+
+    A failed leg's `dispatch_ms` is time-to-failure (how long uAgents took
+    to give up trying to deliver), not an outbound ack latency -- showing
+    it under "Out" reads as "the send was slow" when the send never
+    actually landed. Failed legs show "—" for Out/In/Total instead, with
+    the failure duration folded into the Status cell next to the ✗.
+    """
+    col_agent, col_out, col_in, col_total, col_status = 12, 8, 8, 8, 17
     header = (
         f"{'Agent':<{col_agent}}"
         f"{'Out':>{col_out}}"
@@ -165,16 +175,22 @@ def build_hub_leg_table(legs: list[dict[str, Any]], agent_names: list[str]) -> T
     table = Text(header + "\n", style=MUTED)
     for leg, name in zip(legs, agent_names):
         state = leg.get("state", "pending")
-        out_ms = format_ms(leg.get("dispatch_ms"))
-        in_ms = format_ms(leg.get("reply_ms")) if state == "completed" else "…"
-        total_ms = format_ms(leg.get("latency_ms")) if state == "completed" else "…"
-        if state == "completed":
+        if state == "failed":
+            out_ms = "—"
+            in_ms = "—"
+            total_ms = "—"
+            status = f"✗ failed {format_ms(leg.get('dispatch_ms'))}"
+            row_style = ERROR
+        elif state == "completed":
+            out_ms = format_ms(leg.get("dispatch_ms"))
+            in_ms = format_ms(leg.get("reply_ms"))
+            total_ms = format_ms(leg.get("latency_ms"))
             status = "✓ done"
             row_style = SUCCESS
-        elif state == "failed":
-            status = "✗ failed"
-            row_style = ERROR
         else:
+            out_ms = format_ms(leg.get("dispatch_ms"))
+            in_ms = "…"
+            total_ms = "…"
             status = "⋯ waiting"
             row_style = WARN
         row = (
@@ -238,9 +254,6 @@ def build_peer_leg_table(
     return table
 
 
-MUTED = "#6b7280"
-
-
 def build_hub_detail_summary(
     hub_name: str,
     legs: list[dict[str, Any]],
@@ -262,50 +275,47 @@ def build_hub_detail_summary(
 
 
 def build_hub_network_diagram(
-    spans: list[dict[str, Any]],
-    hub: str,
+    state: TraceState,
     alias_map: dict[str, str],
     *,
     pulse: bool = False,
 ) -> Text:
-    """Hub topology + leg summary table."""
-    legs = build_hub_legs(spans, hub)
-    orch_name = display_name(hub, alias_map)
+    """Hub topology + leg summary table, driven entirely by `state.legs`."""
+    legs = state.legs
+    orch_name = display_name(state.hub, alias_map)
     agent_names = [display_name(leg["subagent"], alias_map) for leg in legs]
     topology = build_hub_topology(legs, orch_name, agent_names, pulse=pulse)
     if not legs:
         return topology
     table = build_hub_leg_table(legs, agent_names)
     legend = build_diagram_legend()
-    return assemble_centered_diagram(topology, table, legend)
+    return assemble_centered_diagram(topology, table, legend, table_legend=build_table_legend())
 
 
-def _latest_peer_round_trip(
-    sends: list[dict[str, Any]],
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Most recent Message send and matching Reply (if any)."""
-    if not sends:
+def _latest_peer_round_trip(hops: list[Hop]) -> tuple[Hop | None, Hop | None]:
+    """Most recent Message hop and matching Reply hop (if any)."""
+    if not hops:
         return None, None
-    if len(sends) >= 2:
-        prev, latest = sends[-2], sends[-1]
+    if len(hops) >= 2:
+        prev, latest = hops[-2], hops[-1]
         if (
-            prev["source_agent"] == latest["dest_agent"]
-            and prev["dest_agent"] == latest["source_agent"]
-            and message_label(prev) == "Message"
-            and message_label(latest) == "Reply"
+            prev.source == latest.dest
+            and prev.dest == latest.source
+            and message_label(prev.payload_type) == "Message"
+            and message_label(latest.payload_type) == "Reply"
         ):
             return prev, latest
-    return sends[-1], None
+    return hops[-1], None
 
 
 def build_peer_network_diagram(
-    sends: list[dict[str, Any]],
+    hops: list[Hop],
     alias_map: dict[str, str],
     *,
     pulse: bool = False,
 ) -> Text:
     """Two-agent bidirectional network view for the latest hop pair."""
-    if not sends:
+    if not hops:
         return Text(
             "  Waiting for messages…\n\n"
             "  Start your instrumented agents\n"
@@ -313,48 +323,30 @@ def build_peer_network_diagram(
             style="dim",
         )
 
-    outbound, reply = _latest_peer_round_trip(sends)
+    outbound, reply = _latest_peer_round_trip(hops)
     if outbound is None:
         return Text("  Waiting for messages…", style="dim")
 
-    left = display_name(outbound["source_agent"], alias_map)
-    right = display_name(outbound["dest_agent"], alias_map)
-    state = outbound.get("state", "pending")
+    left = display_name(outbound.source, alias_map)
+    right = display_name(outbound.dest, alias_map)
+    state = outbound.state
     leg_state = "completed" if state == "delivered" and reply else ("failed" if state in ("dropped", "timeout") else "pending")
 
-    def _lat(span: dict[str, Any] | None) -> int | None:
-        if not span or span.get("acked_at") is None:
-            return None
-        return max(span["acked_at"] - span["enqueued_at"], 0)
-
-    diagram = build_peer_topology(
-        left,
-        right,
-        state=leg_state,
-        pulse=pulse,
-    )
+    diagram = build_peer_topology(left, right, state=leg_state, pulse=pulse)
     table = build_peer_leg_table(
         left,
         right,
-        message_ms=_lat(outbound),
-        reply_ms=_lat(reply) if reply else None,
+        message_ms=outbound.latency_ms,
+        reply_ms=reply.latency_ms if reply else None,
         state=leg_state,
     )
     legend = build_diagram_legend()
-    return assemble_centered_diagram(diagram, table, legend)
-
-
-def _format_ms(ms: int | None) -> str:
-    if ms is None:
-        return "…"
-    if ms >= 1000:
-        return f"{ms / 1000:.2f}s"
-    return f"{ms}ms"
+    return assemble_centered_diagram(diagram, table, legend, table_legend=build_table_legend())
 
 
 def _node_status_label(node: TreeNode) -> str:
     if node.state == "completed":
-        lat = _format_ms(node.latency_ms)
+        lat = format_ms(node.latency_ms)
         return f"{STATE_ICON['delivered']} {lat}"
     if node.state == "failed":
         icon = STATE_ICON["dropped"]
@@ -413,13 +405,14 @@ def build_hub_tree_diagram(
 
 
 def _view_label(view_mode: ViewMode) -> str:
-    return "tree" if view_mode == "tree" else "network"
+    return "tree view" if view_mode == "tree" else "diagram view"
 
 
 def _sub_title_for(setup: WatchSetup, view_mode: ViewMode, *, follow: bool) -> str:
+    """Status line only -- keybindings live in the Footer, not repeated here."""
     names = ", ".join(setup.names.values()) if setup.names else "all agents"
-    follow_hint = "follow" if follow else "pinned"
-    return f"{names}  ·  {_view_label(view_mode)}  ·  {follow_hint}  ·  v view  f follow  q quit"
+    follow_hint = "following latest" if follow else "pinned to one trace"
+    return f"{names}  ·  {_view_label(view_mode)}  ·  {follow_hint}"
 
 
 def _trace_matches_watch(trace: dict[str, Any], addresses: set[str] | None) -> bool:
@@ -432,6 +425,33 @@ def _span_in_watch(span: dict[str, Any], addresses: set[str] | None) -> bool:
     if not addresses:
         return True
     return span["source_agent"] in addresses or span["dest_agent"] in addresses
+
+
+def sidebar_label(trace_id: str, state: TraceState, alias_map: dict[str, str]) -> tuple[str, str]:
+    """(text, style) for one sidebar row -- a fractional rollup, not a
+    binary all-or-nothing ✓/✗, so a hub trace that's 3/4 done doesn't read
+    as a total failure just because one leg is still broken.
+    """
+    if state.total == 0:
+        return f"{trace_id[:6]} · waiting for spans…", MUTED
+
+    if state.shape == HUB and state.hub:
+        hub_name = display_name(state.hub, alias_map)
+        header = f"{hub_name}→{state.total}"
+    else:
+        names = [display_name(a, alias_map) for a in state.participants[:2]]
+        header = "↔".join(names) if len(names) == 2 else (names[0] if names else "?")
+
+    duration = format_ms(state.duration_ms)
+    label = f"{trace_id[:6]} · {header} · {state.completed}/{state.total} ✓ · {duration}"
+
+    if state.failed:
+        style = ERROR
+    elif state.pending:
+        style = WARN
+    else:
+        style = SUCCESS
+    return label, style
 
 
 class LiveApp(App):
@@ -450,10 +470,11 @@ class LiveApp(App):
         color: #6b7280;
     }
     #main-row {
-        height: 3fr;
+        height: 26;
     }
     #trace-list {
-        width: 30;
+        width: 34;
+        height: 100%;
         border: round #1f3d32;
         background: #080c0a;
         padding: 0 1;
@@ -466,12 +487,11 @@ class LiveApp(App):
     }
     #trace-list .-highlight {
         background: #1a2e26;
-        color: #34d399;
         text-style: bold;
     }
     #diagram-col {
         width: 1fr;
-        height: 1fr;
+        height: 100%;
         border: round #34d399;
         background: #0d1210;
         padding: 1 2;
@@ -486,6 +506,20 @@ class LiveApp(App):
         color: #6b7280;
         background: #0a0f0d;
     }
+    #sparkline-row {
+        height: 3;
+        padding: 0 2;
+        background: #0a0f0d;
+    }
+    #sparkline-label {
+        width: 16;
+        color: #6b7280;
+        content-align: left middle;
+    }
+    #latency-sparkline {
+        width: 1fr;
+        color: #34d399;
+    }
     #events-header {
         height: 1;
         padding: 0 2;
@@ -494,7 +528,7 @@ class LiveApp(App):
         background: #0a0f0d;
     }
     #events-panel {
-        height: 2fr;
+        height: 1fr;
         border: round #1f3d32;
         background: #080c0a;
         padding: 0 1;
@@ -519,15 +553,28 @@ class LiveApp(App):
         self.addresses = setup.addresses if setup.filter_only else None
         self.view_mode: ViewMode = setup.view_mode
         self._span_states: dict[str, str] = {}
-        self._logged_span_ids: set[str] = set()
+        self._logged_hop_ids: set[str] = set()
         self._events: deque[Text] = deque(maxlen=MAX_EVENTS)
+        self._latency_history: deque[float] = deque(maxlen=MAX_LATENCY_HISTORY)
         self._active_trace_id: str | None = None
         self._trace_ids: list[str] = []
+        self._trace_rollup_cache: dict[str, TraceState] = {}
         self._alias_map: dict[str, str] = {}
         self._bootstrapped = False
         self._follow_latest = True
         self._pulse_on = False
         self._detail_text = "Select a trace or wait for messages…"
+        self._trace_state: TraceState | None = None
+
+    def _hub_hint(self) -> str | None:
+        """Force hub-style rendering once the wizard has told us who the
+        orchestrator is and configured 3+ watched agents -- same rule the
+        pre-refactor code used, kept so early-trace rendering (before
+        enough spans exist to auto-classify) still shows the fan-out shape.
+        """
+        if self.setup.orchestrator and len(self.setup.addresses) >= 3:
+            return self.setup.orchestrator
+        return None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -537,6 +584,9 @@ class LiveApp(App):
                 with Vertical(id="diagram-col"):
                     yield Static("", id="diagram-content")
             yield Static("", id="detail-bar")
+            with Horizontal(id="sparkline-row"):
+                yield Static("Latency", id="sparkline-label")
+                yield Sparkline([], id="latency-sparkline", summary_function=max)
             yield Static("Live messages", id="events-header")
             yield RichLog(id="events-panel", highlight=False, markup=False, auto_scroll=True)
         yield Footer()
@@ -575,41 +625,80 @@ class LiveApp(App):
             traces = [t for t in traces if _trace_matches_watch(t, self.addresses)]
         traces = traces[:MAX_TRACE_LIST]
         new_ids = [t["trace_id"] for t in traces]
-        if new_ids == self._trace_ids:
-            return
-        self._trace_ids = new_ids
 
         trace_list = self.query_one("#trace-list", ListView)
-        await trace_list.clear()
-        for t in traces:
-            parts = " → ".join(display_name(a, self._alias_map) for a in t["participants"][:3])
-            mark = "✗" if t["has_failure"] else "✓"
-            label = f"{mark} {parts}  {t['trace_id'][:6]}"
-            widget_id = _trace_widget_id(t["trace_id"])
-            trace_list.append(ListItem(Label(label), id=widget_id))
 
-        if self._active_trace_id and self._active_trace_id in self._trace_ids:
-            trace_list.index = self._trace_ids.index(self._active_trace_id)
+        if new_ids != self._trace_ids:
+            self._trace_ids = new_ids
+            await trace_list.clear()
+            for t in traces:
+                widget_id = _trace_widget_id(t["trace_id"])
+                trace_list.append(ListItem(Label(""), id=widget_id))
+            if self._active_trace_id and self._active_trace_id in self._trace_ids:
+                trace_list.index = self._trace_ids.index(self._active_trace_id)
+
+        # Prune rollup cache to what's still visible, then refresh each
+        # row's label. A trace with no pending legs left is cached and
+        # never refetched -- only in-flight traces cost a query per poll.
+        self._trace_rollup_cache = {k: v for k, v in self._trace_rollup_cache.items() if k in new_ids}
+
+        for t in traces:
+            cached = self._trace_rollup_cache.get(t["trace_id"])
+            if cached is not None and cached.pending == 0:
+                state = cached
+            else:
+                spans = await get_trace_spans(self.db_path, t["trace_id"])
+                state = build_trace_state(spans, hub_hint=self._hub_hint())
+                self._trace_rollup_cache[t["trace_id"]] = state
+
+            label_text, style = sidebar_label(t["trace_id"], state, self._alias_map)
+            try:
+                item = trace_list.query_one(f"#{_trace_widget_id(t['trace_id'])}", ListItem)
+                label_widget = item.query_one(Label)
+                label_widget.update(f"[{style}]{label_text}[/]")
+            except Exception:
+                pass
+
+    async def _append_new_feed_events(self) -> bool:
+        """Write any not-yet-logged, terminal hops for the active trace.
+        Shared by the initial load and by polling so the feed always
+        derives from one authoritative, fully-deduplicated hop list.
+        """
+        if not self._active_trace_id:
+            return False
+        events_log = self.query_one("#events-panel", RichLog)
+        spans = await get_trace_spans(self.db_path, self._active_trace_id)
+        if self.addresses:
+            spans = [s for s in spans if _span_in_watch(s, self.addresses)]
+
+        appended = False
+        for hop in build_hops(spans):
+            if hop.state not in ("delivered", "dropped", "timeout"):
+                continue
+            if hop.id in self._logged_hop_ids:
+                continue
+            self._logged_hop_ids.add(hop.id)
+            line = format_event_line(hop, self._alias_map)
+            self._events.append(line)
+            events_log.write(line)
+            if hop.state == "delivered" and hop.latency_ms is not None:
+                self._latency_history.append(hop.latency_ms)
+            appended = True
+
+        if appended:
+            try:
+                sparkline = self.query_one("#latency-sparkline", Sparkline)
+                sparkline.data = list(self._latency_history)
+            except Exception:
+                pass
+        return appended
 
     async def _reload_feed_for_active_trace(self) -> None:
         events_log = self.query_one("#events-panel", RichLog)
         events_log.clear()
         self._events.clear()
-        self._logged_span_ids.clear()
-        if not self._active_trace_id:
-            return
-        spans = await get_trace_spans(self.db_path, self._active_trace_id)
-        for span in spans:
-            if span.get("state") not in ("delivered", "dropped", "timeout"):
-                continue
-            if not _span_in_watch(span, self.addresses):
-                continue
-            if span["id"] in self._logged_span_ids:
-                continue
-            self._logged_span_ids.add(span["id"])
-            line = format_event_line(span, self._alias_map)
-            self._events.append(line)
-            events_log.write(line)
+        self._logged_hop_ids.clear()
+        await self._append_new_feed_events()
 
     async def _select_trace(self, trace_id: str, *, follow: bool | None = None) -> None:
         if follow is not None:
@@ -656,35 +745,23 @@ class LiveApp(App):
         await self._refresh_trace_list()
 
         spans = await get_recent_spans(self.db_path, limit=100, addresses=self.addresses)
-        events_log = self.query_one("#events-panel", RichLog)
-        new_events = False
-
-        if self._follow_latest and self._trace_ids and self._trace_ids[0] != self._active_trace_id:
-            await self._select_trace(self._trace_ids[0], follow=True)
-
+        changed_trace_ids: set[str] = set()
         for span in spans:
             prev = self._span_states.get(span["id"])
             current = span["state"]
             if prev == current:
                 continue
             self._span_states[span["id"]] = current
+            if current in ("delivered", "dropped", "timeout"):
+                changed_trace_ids.add(span["trace_id"])
 
-            if current not in ("delivered", "dropped", "timeout"):
-                continue
-            if not _span_in_watch(span, self.addresses if self.setup.filter_only else None):
-                continue
+        if self._follow_latest and self._trace_ids and self._trace_ids[0] != self._active_trace_id:
+            await self._select_trace(self._trace_ids[0], follow=True)
+            changed_trace_ids.add(self._trace_ids[0])
 
-            if self._follow_latest and span["trace_id"] != self._active_trace_id:
-                await self._select_trace(span["trace_id"], follow=True)
-
-            if span["trace_id"] == self._active_trace_id:
-                if span["id"] in self._logged_span_ids:
-                    continue
-                self._logged_span_ids.add(span["id"])
-                line = format_event_line(span, self._alias_map)
-                self._events.append(line)
-                events_log.write(line)
-                new_events = True
+        new_events = False
+        if self._active_trace_id in changed_trace_ids:
+            new_events = await self._append_new_feed_events()
 
         if new_events or prev_latest != (self._trace_ids[0] if self._trace_ids else None):
             await self._refresh_display()
@@ -734,60 +811,34 @@ class LiveApp(App):
         if self.addresses:
             spans = [s for s in spans if _span_in_watch(s, self.addresses)]
 
-        sends = [
-            s
-            for s in spans
-            if s.get("direction") == "send"
-            and s.get("state") in ("delivered", "dropped", "timeout", "pending")
-        ]
+        state = build_trace_state(spans, hub_hint=self._hub_hint())
+        self._trace_state = state
 
-        pending = any(s.get("state") == "pending" for s in spans)
-        pulse = self._pulse_on and pending
+        pulse = self._pulse_on and state.pending > 0
 
-        if sends:
-            shape, hub = classify_trace_shape(spans)
-            hub_addr = self.setup.orchestrator or hub
-            use_hub = shape == HUB and hub_addr
-            if not use_hub and self.setup.orchestrator and len(self.setup.addresses) >= 3:
-                use_hub = True
-                hub_addr = self.setup.orchestrator
-            if use_hub and hub_addr:
-                if self.view_mode == "tree":
-                    tree = build_interaction_tree(spans, hub_addr)
-                    renderable = build_hub_tree_diagram(tree, self._alias_map)
-                else:
-                    renderable = build_hub_network_diagram(
-                        spans, hub_addr, self._alias_map, pulse=pulse
-                    )
-            else:
-                renderable = build_peer_network_diagram(sends, self._alias_map, pulse=pulse)
-        else:
+        if state.total == 0:
             renderable = Text("Waiting for messages in this trace…", style="dim")
+        elif state.shape == HUB and state.hub:
+            if self.view_mode == "tree" and state.tree is not None:
+                renderable = build_hub_tree_diagram(state.tree, self._alias_map)
+            else:
+                renderable = build_hub_network_diagram(state, self._alias_map, pulse=pulse)
+        else:
+            renderable = build_peer_network_diagram(state.hops, self._alias_map, pulse=pulse)
 
         content.update(self._center_for_panel(renderable))
 
         if not pulse_only:
-            shape, hub = classify_trace_shape(spans)
-            hub_addr = self.setup.orchestrator or hub
-            use_hub = shape == HUB and hub_addr
-            if not use_hub and self.setup.orchestrator and len(self.setup.addresses) >= 3:
-                use_hub = True
-                hub_addr = self.setup.orchestrator
-
-            if use_hub and hub_addr and self.view_mode != "tree":
-                legs = build_hub_legs(spans, hub_addr)
-                orch_name = display_name(hub_addr, self._alias_map)
-                agent_names = [display_name(leg["subagent"], self._alias_map) for leg in legs]
+            if state.shape == HUB and state.hub and self.view_mode != "tree":
+                orch_name = display_name(state.hub, self._alias_map)
+                agent_names = [display_name(leg["subagent"], self._alias_map) for leg in state.legs]
                 self._detail_text = build_hub_detail_summary(
-                    orch_name, legs, agent_names, self._active_trace_id
+                    orch_name, state.legs, agent_names, self._active_trace_id
                 )
             else:
-                delivered = sum(1 for s in spans if s.get("state") == "delivered")
-                failed = sum(1 for s in spans if s.get("state") in ("dropped", "timeout"))
-                pending_n = sum(1 for s in spans if s.get("state") == "pending")
                 self._detail_text = (
                     f"trace {self._active_trace_id[:8]}  ·  "
-                    f"{delivered} delivered  ·  {pending_n} pending  ·  {failed} failed  ·  "
+                    f"{state.completed} delivered  ·  {state.pending} pending  ·  {state.failed} failed  ·  "
                     f"[ ] switch trace"
                 )
             detail.update(self._detail_text)
