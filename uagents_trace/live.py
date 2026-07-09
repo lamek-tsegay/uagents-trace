@@ -430,6 +430,11 @@ def sidebar_label(trace_id: str, state: TraceState, alias_map: dict[str, str]) -
     """(text, style) for one sidebar row -- a fractional rollup, not a
     binary all-or-nothing ✓/✗, so a hub trace that's 3/4 done doesn't read
     as a total failure just because one leg is still broken.
+
+    Color is fractional too: red is reserved for a trace where *every*
+    leg failed. A trace with some legs ok and some failed (or still
+    pending) reads amber -- "needs a look", not "everything is broken".
+    Only a fully clean trace (nothing failed or pending) reads green.
     """
     if state.total == 0:
         return f"{trace_id[:6]} · waiting for spans…", MUTED
@@ -444,13 +449,24 @@ def sidebar_label(trace_id: str, state: TraceState, alias_map: dict[str, str]) -
     duration = format_ms(state.duration_ms)
     label = f"{trace_id[:6]} · {header} · {state.completed}/{state.total} ✓ · {duration}"
 
-    if state.failed:
+    if state.failed and state.failed == state.total:
         style = ERROR
-    elif state.pending:
-        style = WARN
-    else:
+    elif state.completed == state.total:
         style = SUCCESS
+    else:
+        style = WARN
     return label, style
+
+
+def _sidebar_markup(label_text: str, style: str) -> str:
+    """Rich markup for one sidebar row: the trace id stays neutral/dim
+    regardless of outcome, and only the status-bearing remainder (header ·
+    fraction · duration) carries the semantic color.
+    """
+    id_part, sep, rest = label_text.partition(" · ")
+    if not sep:
+        return f"[{MUTED}]{label_text}[/]"
+    return f"[{MUTED}]{id_part}[/] · [{style}]{rest}[/]"
 
 
 class LiveApp(App):
@@ -472,7 +488,7 @@ class LiveApp(App):
         height: 26;
     }
     #trace-list {
-        width: 34;
+        width: 46;
         height: 100%;
         border: round #1f3d32;
         background: #080c0a;
@@ -636,7 +652,7 @@ class LiveApp(App):
             try:
                 item = trace_list.query_one(f"#{_trace_widget_id(t['trace_id'])}", ListItem)
                 label_widget = item.query_one(Label)
-                label_widget.update(f"[{style}]{label_text}[/]")
+                label_widget.update(_sidebar_markup(label_text, style))
             except Exception:
                 pass
 
