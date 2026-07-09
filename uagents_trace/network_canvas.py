@@ -113,7 +113,25 @@ def format_ms(ms: int | None) -> str:
 
 
 def build_diagram_legend() -> Text:
-    return Text("outbound · return · pending", style=MUTED)
+    """Color key for the diagram -- what each arrow/glyph color means."""
+    legend = Text()
+    legend.append("● ", style=MUTED)
+    legend.append("dispatch", style=MUTED)
+    legend.append("   ● ", style=SUCCESS)
+    legend.append("delivered", style=SUCCESS)
+    legend.append("   ● ", style=WARN)
+    legend.append("pending", style=WARN)
+    legend.append("   ● ", style=ERROR)
+    legend.append("failed", style=ERROR)
+    return legend
+
+
+def build_table_legend() -> Text:
+    """Column key for the leg/route table -- what Out/In/Total measure."""
+    return Text(
+        "Out = send ack  ·  In = return ack  ·  Total = round trip (incl. processing)",
+        style=MUTED,
+    )
 
 
 def _block_width(text: Text) -> int:
@@ -143,13 +161,18 @@ def _line_style(state: str, pulse: bool) -> str:
 
 
 def _stem_style(legs: list[dict[str, Any]], pulse: bool) -> str:
+    """Color for the shared trunk (hub down to the bus) -- deliberately
+    never escalates to ERROR just because one of several legs failed. The
+    trunk is shared wiring, not any single leg's outcome; painting it red
+    on a partial failure makes every successful leg passing through it
+    look broken too, drowning out the one arrow that should actually pop.
+    Red is reserved for that specific failed leg's own arrow.
+    """
     if legs and all(leg.get("state") == "completed" for leg in legs):
         return SUCCESS
-    if any(leg.get("state") == "failed" for leg in legs):
-        return ERROR
     if pulse and any(leg.get("state") == "pending" for leg in legs):
         return WARN
-    return ACCENT
+    return MUTED
 
 
 def _bus_junction_char(x: int, hub_cx: int, agent_centers: set[int]) -> str:
@@ -293,19 +316,39 @@ def build_peer_topology(
     return canvas.to_text()
 
 
-def assemble_centered_diagram(topology: Text, table: Text, legend: Text) -> Text:
-    """Stack topology, table, and legend centered as one block."""
+def _centered_line(line: Text, width: int) -> Text:
+    pad = max(0, (width - len(line.plain)) // 2)
+    result = Text(" " * pad)
+    result.append_text(line)
+    return result
+
+
+def assemble_centered_diagram(
+    topology: Text,
+    table: Text,
+    legend: Text,
+    table_legend: Text | None = None,
+) -> Text:
+    """Stack topology, table, and legend(s) centered as one block.
+
+    Centers by padding rather than restyling to `.plain`, so a
+    multi-colored legend (e.g. per-status dots) keeps its per-run styles
+    instead of collapsing to a single flat color.
+    """
     width = _block_width(topology)
     width = max(width, _block_width(table), len(legend.plain))
+    if table_legend is not None:
+        width = max(width, len(table_legend.plain))
+
     result = Text()
     result.append_text(_center_plain_block(topology, width))
     result.append("\n\n")
     result.append_text(_center_plain_block(table, width))
     result.append("\n")
-    legend_line = legend.plain.strip()
-    pad = max(0, (width - len(legend_line)) // 2)
-    result.append(" " * pad, style=MUTED)
-    result.append(legend_line, style=MUTED)
+    if table_legend is not None:
+        result.append_text(_centered_line(table_legend, width))
+        result.append("\n")
+    result.append_text(_centered_line(legend, width))
     return result
 
 
