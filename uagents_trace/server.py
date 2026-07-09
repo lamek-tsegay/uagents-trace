@@ -12,6 +12,7 @@ import sys
 import time
 import urllib.request
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
 
 import uvicorn
@@ -19,7 +20,14 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from .shape import HUB, build_hub_legs, build_interaction_tree, classify_trace_shape, tree_node_to_dict
+from .shape import (
+    HUB,
+    build_hub_legs,
+    build_interaction_tree,
+    build_trace_state,
+    classify_trace_shape,
+    tree_node_to_dict,
+)
 from .store import default_db_path, get_trace_spans, init_db, list_aliases, list_traces, remove_alias, set_alias
 
 HOST = "127.0.0.1"
@@ -143,7 +151,30 @@ async def index() -> FileResponse:
 
 @app.get("/api/traces")
 async def api_list_traces() -> list[dict]:
-    return await list_traces(default_db_path())
+    """Trace summaries, enriched with a rollup (completed/failed/pending
+    out of total legs-or-hops) computed the same way the TUI's sidebar
+    computes it -- via `build_trace_state` -- so the dashboard's trace
+    list can show a fractional status instead of a binary ok/FAILURE.
+    """
+    db_path = default_db_path()
+    traces = await list_traces(db_path)
+    enriched = []
+    for t in traces:
+        spans = await get_trace_spans(db_path, t["trace_id"])
+        state = build_trace_state(spans)
+        enriched.append(
+            {
+                **t,
+                "shape": state.shape,
+                "hub": state.hub,
+                "completed": state.completed,
+                "failed": state.failed,
+                "pending": state.pending,
+                "total": state.total,
+                "duration_ms": state.duration_ms,
+            }
+        )
+    return enriched
 
 
 @app.get("/api/traces/{trace_id}")
@@ -152,6 +183,34 @@ async def api_get_trace(trace_id: str) -> list[dict]:
     if not spans:
         raise HTTPException(status_code=404, detail="Trace not found")
     return spans
+
+
+@app.get("/api/traces/{trace_id}/hops")
+async def api_get_trace_hops(trace_id: str) -> dict:
+    """Send/receive span twins merged into one hop per logical message
+    (see `shape.build_hops`), plus the same rollup `build_trace_state`
+    gives the TUI -- this is what the dashboard renders its waterfall
+    from, instead of the raw per-span list `/api/traces/{trace_id}`
+    returns, so the web UI can't drift from the TUI's dedup logic by
+    reimplementing it in JavaScript.
+    """
+    db_path = default_db_path()
+    spans = await get_trace_spans(db_path, trace_id)
+    if not spans:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    state = build_trace_state(spans)
+    return {
+        "trace_id": trace_id,
+        "shape": state.shape,
+        "hub": state.hub,
+        "hops": [asdict(h) for h in state.hops],
+        "legs": state.legs,
+        "completed": state.completed,
+        "failed": state.failed,
+        "pending": state.pending,
+        "total": state.total,
+        "duration_ms": state.duration_ms,
+    }
 
 
 @app.get("/api/traces/{trace_id}/tree")
