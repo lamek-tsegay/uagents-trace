@@ -16,6 +16,7 @@ from textual.binding import Binding
 from textual.widgets import DataTable, Footer, Header
 
 from .cli import display_name, relative_time
+from .shape import TraceState, build_hops, build_trace_state
 from .store import get_alias_map, get_trace_spans, list_traces
 
 POLL_SECONDS = 1.0
@@ -29,8 +30,21 @@ STATE_COLOR = {
 }
 
 
-def _trace_row_style(trace: dict[str, Any]) -> str:
-    return "red" if trace["has_failure"] else "green"
+def _rollup_style(state: TraceState) -> str:
+    if state.failed:
+        return "red"
+    if state.pending:
+        return "yellow"
+    return "green"
+
+
+def _rollup_status(state: TraceState) -> str:
+    if state.total == 0:
+        return "…"
+    status = f"{state.completed}/{state.total} ✓"
+    if state.failed:
+        status += f"  ({state.failed} failed)"
+    return status
 
 
 class TraceApp(App):
@@ -47,6 +61,10 @@ class TraceApp(App):
         self.expanded: set[str] = set()
         self.span_cache: dict[str, list[dict[str, Any]]] = {}
         self.alias_map: dict[str, str] = {}
+        # A trace with no pending legs left never changes again, so its
+        # rollup is cached rather than refetched every second poll -- only
+        # in-flight traces cost a query per tick.
+        self._rollup_cache: dict[str, TraceState] = {}
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -93,12 +111,27 @@ class TraceApp(App):
 
         live_trace_ids = {t["trace_id"] for t in traces}
         self.expanded &= live_trace_ids
+        self._rollup_cache = {k: v for k, v in self._rollup_cache.items() if k in live_trace_ids}
         for trace_id in self.expanded:
             self.span_cache[trace_id] = await get_trace_spans(self.db_path, trace_id)
 
+        rollups: dict[str, TraceState] = {}
+        for t in traces:
+            trace_id = t["trace_id"]
+            cached = self._rollup_cache.get(trace_id)
+            if cached is not None and cached.pending == 0:
+                rollups[trace_id] = cached
+                continue
+            spans = self.span_cache.get(trace_id)
+            if spans is None:
+                spans = await get_trace_spans(self.db_path, trace_id)
+            state = build_trace_state(spans)
+            self._rollup_cache[trace_id] = state
+            rollups[trace_id] = state
+
         table.clear()
         for t in traces:
-            self._add_trace_row(table, t)
+            self._add_trace_row(table, t, rollups[t["trace_id"]])
             if t["trace_id"] in self.expanded:
                 self._add_span_rows(table, t["trace_id"])
 
@@ -108,11 +141,11 @@ class TraceApp(App):
             except Exception:
                 pass
 
-    def _add_trace_row(self, table: DataTable, t: dict[str, Any]) -> None:
-        style = _trace_row_style(t)
+    def _add_trace_row(self, table: DataTable, t: dict[str, Any], state: TraceState) -> None:
+        style = _rollup_style(state)
         marker = "▾" if t["trace_id"] in self.expanded else "▸"
         participants = " -> ".join(display_name(a, self.alias_map) for a in t["participants"])
-        status = "✗ FAILURE" if t["has_failure"] else "✓ OK"
+        status = _rollup_status(state)
         table.add_row(
             Text(relative_time(t["started_at"]), style=style),
             Text(f"{marker} {participants}", style=style),
@@ -125,24 +158,25 @@ class TraceApp(App):
 
     def _add_span_rows(self, table: DataTable, trace_id: str) -> None:
         spans = self.span_cache.get(trace_id) or []
-        if not spans:
+        hops = build_hops(spans)
+        if not hops:
             table.add_row(Text(""), Text("  (no spans)", style="dim"), Text(""), Text(""), Text(""), Text(""), key=f"{trace_id}:empty")
             return
 
-        start = min(s["enqueued_at"] for s in spans)
-        end = max((s["acked_at"] or s["enqueued_at"]) for s in spans)
+        start = min(h.enqueued_at for h in hops)
+        end = max((h.acked_at or h.enqueued_at) for h in hops)
         span_ms = max(end - start, 1)
 
-        for s in spans:
-            latency_ms = (s["acked_at"] - s["enqueued_at"]) if s["acked_at"] is not None else None
-            left = int(((s["enqueued_at"] - start) / span_ms) * BAR_WIDTH)
+        for h in hops:
+            latency_ms = h.latency_ms
+            left = int(((h.enqueued_at - start) / span_ms) * BAR_WIDTH)
             width = max(1, int((latency_ms / span_ms) * BAR_WIDTH)) if latency_ms is not None else 2
-            color = STATE_COLOR.get(s["state"], "white")
+            color = STATE_COLOR.get(h.state, "white")
             bar = Text(" " * left + "█" * width, style=color)
 
-            src = display_name(s["source_agent"], self.alias_map)
-            dst = display_name(s["dest_agent"], self.alias_map)
-            label = Text(f"    {src} -> {dst}  {s['payload_type']}", style=color)
+            src = display_name(h.source, self.alias_map)
+            dst = display_name(h.dest, self.alias_map)
+            label = Text(f"    {src} -> {dst}  {h.payload_type}", style=color)
             latency_label = Text(f"{latency_ms} ms" if latency_ms is not None else "pending…", style=color)
 
             table.add_row(
@@ -150,21 +184,21 @@ class TraceApp(App):
                 label,
                 bar,
                 Text(""),
-                Text(s["state"], style=color),
+                Text(h.state, style=color),
                 latency_label,
-                key=f"{trace_id}:{s['id']}",
+                key=f"{trace_id}:{h.id}",
             )
 
-            if s["state"] in ("dropped", "timeout"):
-                reason = s["error"] or "(no error message)"
+            if h.state in ("dropped", "timeout"):
+                reason = h.error or "(no error message)"
                 table.add_row(
                     Text(""),
-                    Text(f"      ⚠ {s['state'].upper()}: {reason}", style=f"bold {color}"),
+                    Text(f"      ⚠ {h.state.upper()}: {reason}", style=f"bold {color}"),
                     Text(""),
                     Text(""),
                     Text(""),
                     Text(""),
-                    key=f"{trace_id}:{s['id']}:reason",
+                    key=f"{trace_id}:{h.id}:reason",
                 )
 
 
