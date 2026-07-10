@@ -3,7 +3,14 @@ import unittest
 from uagents import Model
 
 from uagents_trace.live import (
+    DEGRADED_MARKER,
+    FAILURE_MARKER,
+    LATENCY_BAR_EMPTY,
+    LATENCY_BAR_FILLED,
+    LATENCY_BAR_SCALE_MS,
+    LATENCY_BAR_WIDTH,
     MUTED,
+    _latency_bar,
     _sidebar_markup,
     build_hub_detail_summary,
     build_hub_leg_table,
