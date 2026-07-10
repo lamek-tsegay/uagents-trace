@@ -1256,6 +1256,10 @@ class LiveApp(App):
             trace_id = _trace_id_from_widget_id(str(event.item.id))
             await self._select_trace(trace_id, follow=False)
 
+    async def on_diagram_canvas_agent_clicked(self, message: DiagramCanvas.AgentClicked) -> None:
+        self._selected_agent = message.agent
+        await self._refresh_display()
+
     async def action_toggle_follow(self) -> None:
         self._follow_latest = not self._follow_latest
         if self._follow_latest and self._trace_ids:
