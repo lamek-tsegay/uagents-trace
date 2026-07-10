@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from rich.text import Text
 
 ACCENT = "#34d399"
 MUTED = "#6b7280"
-SUCCESS = "#4ade80"
+# Dimmed on purpose: delivered/completed is the steady state, so it's the
+# color on screen the most. Keeping it saturated made everything read as
+# "one wall of green" with nothing to focus on. ERROR stays fully bright --
+# bright/bold is now reserved for failures and the selected trace, not for
+# the common case.
+SUCCESS = "#3f8f66"
 ERROR = "#f87171"
 WARN = "#facc15"
 
