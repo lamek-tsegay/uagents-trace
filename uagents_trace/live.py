@@ -713,6 +713,35 @@ def _hub_leg_detail(
 
     return block
 
+
+def _peer_hop_detail(hop: Hop, started_at: int, alias_map: dict[str, str]) -> Text:
+    """Full detail block for one peer hop -- mirrors `_hub_leg_detail` but
+    reads straight off the already-deduplicated `Hop`.
+    """
+    src = display_name(hop.source, alias_map)
+    dst = display_name(hop.dest, alias_map)
+    state = hop.state or "pending"
+    style = STATE_STYLE.get(state, "white")
+    icon = STATE_ICON.get(state, "·")
+
+    block = Text()
+    block.append(f"{icon} {src} → {dst}\n", style=f"bold {style}")
+    block.append(f"  {_format_payload(hop)}\n", style=MUTED)
+    block.append(f"  protocol: {hop.protocol or '—'}\n", style=MUTED)
+
+    enq_rel = _relative_ms(hop.enqueued_at, started_at)
+    if hop.acked_at is None:
+        block.append(f"    +{enq_rel}ms → …\n", style=style)
+    else:
+        ack_rel = _relative_ms(hop.acked_at, started_at)
+        block.append(f"    +{enq_rel}ms → +{ack_rel}ms   (Δ{hop.latency_ms}ms)\n", style=style)
+
+    if state in ("dropped", "timeout"):
+        reason = hop.error or "(no error message)"
+        block.append(f"  error: {reason}\n", style=f"bold {ERROR}")
+
+    return block
+
 class LiveApp(App):
     """Live network diagram + trace list + rolling message feed."""
 
