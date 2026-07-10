@@ -1103,30 +1103,44 @@ class LiveApp(App):
             with Horizontal(id="main-row"):
                 yield ListView(id="trace-list")
                 with Vertical(id="diagram-col"):
-                    yield Static("", id="diagram-content")
-                yield Static(_BRAND_TEXT, id="brand-panel")
-            yield Static("", id="detail-bar")
+                    yield DiagramCanvas("", id="diagram-content")
+                    yield Static("", id="leg-table-content")
+                    yield Static("", id="trace-summary")
+                with Vertical(id="inspector-col"):
+                    yield Static(_BRAND_MARK_TEXT, id="inspector-header")
+                    with VerticalScroll(id="inspector-scroll", classes="inspector-empty"):
+                        yield Static(Text(INSPECTOR_EMPTY_HINT, style="dim"), id="inspector-content")
             yield Static("Live messages", id="events-header")
             yield RichLog(id="events-panel", highlight=False, markup=False, auto_scroll=True)
         yield Footer()
 
     def on_resize(self, event: events.Resize) -> None:
-        self._apply_brand_panel_visibility(event.size.width)
+        self._apply_inspector_visibility(event.size.width)
 
-    def _apply_brand_panel_visibility(self, width: int) -> None:
+    def _apply_inspector_visibility(self, width: int) -> None:
         try:
-            panel = self.query_one("#brand-panel", Static)
+            panel = self.query_one("#inspector-col")
         except Exception:
             return
-        panel.display = width >= MIN_WIDTH_FOR_BRAND_PANEL
+        panel.display = width >= MIN_WIDTH_FOR_INSPECTOR
 
     async def on_mount(self) -> None:
+        # Pushed first, before anything else in this method, and awaited
+        # (not fire-and-forget) so the splash is unconditional and
+        # deterministic: every launch pushes it, fully mounted, before any
+        # later setup step (title, inspector visibility, bootstrap) runs --
+        # none of those can ever cause it to be skipped, since none of them
+        # get a chance to run first or raise before the push happens. The
+        # widgets on the main screen underneath stay reachable via
+        # `query_one` the whole time (pushing a screen doesn't unmount the
+        # one below it), so none of the calls after this need to change.
+        await self.push_screen(SplashScreen())
+
         self.title = "uagents-trace live"
         self.sub_title = _sub_title_for(self.setup, self.view_mode, follow=self._follow_latest)
         events_log = self.query_one("#events-panel", RichLog)
         events_log.write(Text("  Waiting for message flow…", style="#6b7280"))
-        self.query_one("#detail-bar", Static).update(self._detail_text)
-        self._apply_brand_panel_visibility(self.size.width)
+        self._apply_inspector_visibility(self.size.width)
         await self._bootstrap()
         self.set_interval(POLL_SECONDS, self._poll)
         self.set_interval(PULSE_SECONDS, self._pulse_tick)
