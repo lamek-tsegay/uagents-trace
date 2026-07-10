@@ -1363,6 +1363,12 @@ class LiveApp(App):
                         )
                     )
                 )
+                content.hit_regions = {}
+                content.left_pad = 0
+                table_content.update("")
+                summary_content.update("")
+                inspector_scroll.set_class(True, "inspector-empty")
+                inspector.update(Text(INSPECTOR_EMPTY_HINT, style="dim"))
             return
 
         spans = await get_trace_spans(self.db_path, self._active_trace_id)
