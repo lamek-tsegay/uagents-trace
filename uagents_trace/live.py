@@ -14,12 +14,13 @@ from collections import deque
 from typing import Any
 
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Label, ListItem, ListView, RichLog, Static
 
-from .brand import FETCH_BRAND
+from .brand import BRAND_PANEL_WIDTH, FETCH_BRAND
 from .cli import display_name
 from .network_canvas import (
     ACCENT,
@@ -49,9 +50,20 @@ TRACE_WIDGET_PREFIX = "trace-"
 
 MUTED = "#6b7280"
 
-# Brand panel pure chrome (see .brand) -- a third, fixed-width column right
-# of the diagram.
+# Brand panel pure chrome (see .brand) -- shown as a third, fixed-width
+# column right of the diagram. Below MIN_WIDTH_FOR_BRAND_PANEL it hides
+# itself entirely rather than shrink, since the diagram (a 4-subagent hub
+# trace renders ~100 cols wide, see network_canvas.build_hub_topology) must
+# stay legible first. 228 = sidebar (~48 incl. border) + a diagram column
+# wide enough for that hub layout without cramming (~106) + the braille
+# brand panel (BRAND_PANEL_WIDTH=76 incl. border).
+MIN_WIDTH_FOR_BRAND_PANEL = 228
 _BRAND_TEXT = Text(FETCH_BRAND.strip("\n"), style=ACCENT)
+
+# Textual CSS can't interpolate a Python constant into #brand-panel's
+# `width:` (braces in an f-string would collide with CSS block syntax), so
+# that value is hardcoded there -- this just catches the two drifting apart.
+assert BRAND_PANEL_WIDTH == 76, "update #brand-panel's CSS width alongside brand.BRAND_PANEL_WIDTH"
 
 
 def _trace_widget_id(trace_id: str) -> str:
@@ -603,12 +615,23 @@ class LiveApp(App):
             yield RichLog(id="events-panel", highlight=False, markup=False, auto_scroll=True)
         yield Footer()
 
+    def on_resize(self, event: events.Resize) -> None:
+        self._apply_brand_panel_visibility(event.size.width)
+
+    def _apply_brand_panel_visibility(self, width: int) -> None:
+        try:
+            panel = self.query_one("#brand-panel", Static)
+        except Exception:
+            return
+        panel.display = width >= MIN_WIDTH_FOR_BRAND_PANEL
+
     async def on_mount(self) -> None:
         self.title = "uagents-trace live"
         self.sub_title = _sub_title_for(self.setup, self.view_mode, follow=self._follow_latest)
         events_log = self.query_one("#events-panel", RichLog)
         events_log.write(Text("  Waiting for message flow…", style="#6b7280"))
         self.query_one("#detail-bar", Static).update(self._detail_text)
+        self._apply_brand_panel_visibility(self.size.width)
         await self._bootstrap()
         self.set_interval(POLL_SECONDS, self._poll)
         self.set_interval(PULSE_SECONDS, self._pulse_tick)
