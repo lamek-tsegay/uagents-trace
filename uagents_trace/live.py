@@ -742,6 +742,72 @@ def _peer_hop_detail(hop: Hop, started_at: int, alias_map: dict[str, str]) -> Te
 
     return block
 
+
+INSPECTOR_EMPTY_HINT = "click an agent for details"
+
+
+def build_agent_inspector_text(
+    agent: str,
+    trace_id: str,
+    state: TraceState,
+    spans: list[dict[str, Any]],
+    alias_map: dict[str, str],
+) -> Text:
+    """Deep detail for exactly one clicked agent -- full payload, protocol,
+    dispatch->reply->total timing, and raw error text. Nothing else from
+    the trace leaks in here; that's the point of click-to-reveal instead
+    of dumping every agent's detail into the panel at once.
+    """
+    text = Text()
+    text.append(f"Session  {trace_id}\n\n", style=MUTED)
+
+    if state.shape == HUB and state.hub:
+        leg = next((leg for leg in state.legs if leg["subagent"] == agent), None)
+        if leg is None:
+            text.append("No detail for this agent in the current trace.", style="dim")
+            return text
+        text.append_text(_hub_leg_detail(leg, spans, state.hub, state.started_at, alias_map))
+        return text
+
+    outbound, reply = _latest_peer_round_trip(state.hops)
+    if outbound is None:
+        text.append("No detail for this agent in the current trace.", style="dim")
+        return text
+    if agent == outbound.source:
+        text.append_text(_peer_hop_detail(outbound, state.started_at, alias_map))
+    elif reply is not None and agent == outbound.dest:
+        text.append_text(_peer_hop_detail(reply, state.started_at, alias_map))
+    elif agent == outbound.dest:
+        name = display_name(agent, alias_map)
+        text.append(f"{name}\n", style=f"bold {WARN}")
+        text.append("  waiting for reply…", style=WARN)
+    else:
+        text.append("No detail for this agent in the current trace.", style="dim")
+    return text
+
+
+def build_trace_summary_line(
+    trace_id: str,
+    state: TraceState,
+    alias_map: dict[str, str],
+) -> Text:
+    """One-line trace-level rollup for the center column, under the
+    diagram/table -- moved out of the inspector, which is per-agent detail
+    only now (see `build_agent_inspector_text`).
+    """
+    if state.total == 0:
+        return Text(f"trace {trace_id[:8]}  ·  waiting for messages…", style="dim")
+
+    if state.shape == HUB and state.hub:
+        orch_name = display_name(state.hub, alias_map)
+        agent_names = [display_name(leg["subagent"], alias_map) for leg in state.legs]
+        summary = build_hub_detail_summary(orch_name, state.legs, agent_names, trace_id)
+    else:
+        summary = (
+            f"{state.completed} delivered  ·  {state.pending} pending  ·  {state.failed} failed  ·  "
+            f"trace {trace_id[:8]}"
+        )
+    return Text(f"{summary}  ·  click an agent above for detail", style=MUTED)
 class LiveApp(App):
     """Live network diagram + trace list + rolling message feed."""
 
