@@ -926,6 +926,37 @@ class SplashScreen(Screen):
         self.app.pop_screen()
 
 
+class DiagramCanvas(Static):
+    """The diagram widget -- hit-tests clicks against the agent box regions
+    computed alongside the last render (see `LiveApp._refresh_display`) and
+    posts `AgentClicked` for the app to handle. Kept as a small subclass
+    rather than an app-level `on_click` so hit-testing stays colocated with
+    the widget whose regions it's testing against.
+    """
+
+    class AgentClicked(Message):
+        def __init__(self, agent: str) -> None:
+            self.agent = agent
+            super().__init__()
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # address -> (x0, y0, x1, y1), in this widget's own local
+        # coordinates once `left_pad` (the horizontal centering offset
+        # applied when the topology was rendered) is subtracted.
+        self.hit_regions: dict[str, tuple[int, int, int, int]] = {}
+        self.left_pad = 0
+
+    def on_click(self, event: events.Click) -> None:
+        x = event.x - self.left_pad
+        y = event.y
+        for agent, (x0, y0, x1, y1) in self.hit_regions.items():
+            if x0 <= x < x1 and y0 <= y < y1:
+                event.stop()
+                self.post_message(self.AgentClicked(agent))
+                return
+
+
 class LiveApp(App):
     """Live network diagram + trace list + rolling message feed."""
 
