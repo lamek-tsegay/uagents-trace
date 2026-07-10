@@ -577,6 +577,11 @@ def sidebar_label(trace_id: str, state: TraceState, alias_map: dict[str, str]) -
     leg failed. A trace with some legs ok and some failed (or still
     pending) reads amber -- "needs a look", not "everything is broken".
     Only a fully clean trace (nothing failed or pending) reads green.
+
+    A trace with *any* failed leg always carries a marker (⚑ if every leg
+    failed, ⚠ if only some did) so it stands out from a scan of the list
+    without having to read the x/y fraction -- a partially-failed trace
+    must never look like a plain in-progress one.
     """
     if state.total == 0:
         return f"{trace_id[:6]} · waiting for spans…", MUTED
