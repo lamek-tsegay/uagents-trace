@@ -661,6 +661,58 @@ def _timing_line(label: str, span: dict[str, Any] | None, started_at: int) -> Te
 _LEG_ICON = {"completed": STATE_ICON["delivered"], "failed": STATE_ICON["dropped"], "pending": STATE_ICON["pending"]}
 _LEG_STYLE = {"completed": SUCCESS, "failed": ERROR, "pending": WARN}
 
+
+def _hub_leg_detail(
+    leg: dict[str, Any],
+    spans: list[dict[str, Any]],
+    hub: str,
+    started_at: int,
+    alias_map: dict[str, str],
+) -> Text:
+    """Full detail block for one hub leg: payload, protocol, raw error, and
+    an enqueued->acked breakdown per phase (dispatch, reply) rather than
+    just the leg table's rolled-up Total.
+    """
+    subagent = leg["subagent"]
+    name = display_name(subagent, alias_map)
+    state = leg.get("state", "pending")
+    style = _LEG_STYLE.get(state, WARN)
+    icon = _LEG_ICON.get(state, "·")
+
+    dispatch = _find_span(spans, hub, subagent, "send")
+    reply = _find_span(spans, subagent, hub, "send")
+
+    block = Text()
+    block.append(f"{icon} {name}\n", style=f"bold {style}")
+
+    ptype = leg.get("dispatch_payload")
+    payload = leg.get("dispatch_message")
+    label = f'{ptype}: "{payload}"' if payload else (ptype or "")
+    if label:
+        block.append(f"  {label}\n", style=MUTED)
+
+    protocol = dispatch.get("protocol") if dispatch else None
+    block.append(f"  protocol: {protocol or '—'}\n", style=MUTED)
+
+    dispatch_line = _timing_line("dispatch", dispatch, started_at)
+    if dispatch_line is not None:
+        block.append_text(dispatch_line)
+        block.append("\n")
+
+    if state == "completed":
+        reply_line = _timing_line("reply", reply, started_at)
+        if reply_line is not None:
+            block.append_text(reply_line)
+            block.append("\n")
+        block.append(f"    {'total':<8} Δ{leg.get('latency_ms')}ms\n", style=style)
+    elif state == "failed":
+        reason = leg.get("reason") or "(no error message)"
+        block.append(f"  error: {reason}\n", style=f"bold {ERROR}")
+    else:
+        block.append("  waiting for reply…\n", style=WARN)
+
+    return block
+
 class LiveApp(App):
     """Live network diagram + trace list + rolling message feed."""
 
