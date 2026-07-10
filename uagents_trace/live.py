@@ -1243,6 +1243,10 @@ class LiveApp(App):
             self.sub_title = _sub_title_for(self.setup, self.view_mode, follow=self._follow_latest)
             return
         self._active_trace_id = trace_id
+        # A selection from the previous trace's agents doesn't mean
+        # anything for a different trace -- back to the empty-state hint
+        # until the user clicks an agent in this one.
+        self._selected_agent = None
         await self._reload_feed_for_active_trace()
         self.sub_title = _sub_title_for(self.setup, self.view_mode, follow=self._follow_latest)
         await self._refresh_display()
