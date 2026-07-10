@@ -1079,8 +1079,13 @@ class LiveApp(App):
         self._bootstrapped = False
         self._follow_latest = True
         self._pulse_on = False
-        self._detail_text = "Select a trace or wait for messages…"
         self._trace_state: TraceState | None = None
+        # Address of the agent whose box was last clicked -- None means
+        # nothing selected, so the inspector shows the empty-state hint
+        # instead of any agent's detail. Reset whenever the active trace
+        # changes, since a selection from a different trace's agents
+        # wouldn't mean anything here.
+        self._selected_agent: str | None = None
 
     def _hub_hint(self) -> str | None:
         """Force hub-style rendering once the wizard has told us who the
