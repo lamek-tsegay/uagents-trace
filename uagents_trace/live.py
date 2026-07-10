@@ -808,6 +808,24 @@ def build_trace_summary_line(
             f"trace {trace_id[:8]}"
         )
     return Text(f"{summary}  ·  click an agent above for detail", style=MUTED)
+
+
+SPLASH_ROW_STAGGER_SECONDS = 0.04
+SPLASH_HOLD_SECONDS = 1.5
+SPLASH_FADE_SECONDS = 0.4
+# Below this width the braille logo (78 cols) wouldn't fit without wrapping
+# into garbage, so the splash degrades to a plain title and skips the
+# row-by-row draw -- there's nothing worth staggering at that size.
+SPLASH_MIN_WIDTH_FOR_LOGO = 84
+
+_BRAND_LINES = FETCH_BRAND.strip("\n").split("\n")
+_BRAND_LOGO_LINES = [line for line in _BRAND_LINES if line.strip()]
+_BRAND_TITLE_LINE = _BRAND_LINES[-1].strip()
+# One-line mark for the inspector header -- the first glyph block of the
+# full logo (row 0, up to the first double-blank run) plus the wordmark, so
+# the brand stays visible in the header even while the panel body is
+# showing inspector detail instead of the empty-state logo.
+_BRAND_MARK_TEXT = Text(f"{_BRAND_LOGO_LINES[0][:11]}  {_BRAND_TITLE_LINE}", style=f"bold {ACCENT}")
 class LiveApp(App):
     """Live network diagram + trace list + rolling message feed."""
 
