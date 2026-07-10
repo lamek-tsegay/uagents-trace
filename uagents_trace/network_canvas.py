@@ -179,6 +179,8 @@ def _line_style(state: str, pulse: bool) -> str:
         return WARN
     if state == "completed":
         return SUCCESS
+    if state == "failed":
+        return f"bold {ERROR}"
     return STATE_STYLE.get(state, ACCENT)
 
 
