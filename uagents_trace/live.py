@@ -17,7 +17,9 @@ from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.message import Message
+from textual.screen import Screen
 from textual.widgets import Footer, Header, Label, ListItem, ListView, RichLog, Static
 
 from .brand import BRAND_PANEL_WIDTH, FETCH_BRAND
@@ -28,8 +30,11 @@ from .network_canvas import (
     SUCCESS,
     WARN,
     assemble_centered_diagram,
+    block_width,
     build_diagram_legend,
+    build_hub_hit_regions,
     build_hub_topology,
+    build_peer_hit_regions,
     build_peer_topology,
     build_table_legend,
     center_in_width,
@@ -50,20 +55,19 @@ TRACE_WIDGET_PREFIX = "trace-"
 
 MUTED = "#6b7280"
 
-# Brand panel pure chrome (see .brand) -- shown as a third, fixed-width
-# column right of the diagram. Below MIN_WIDTH_FOR_BRAND_PANEL it hides
-# itself entirely rather than shrink, since the diagram (a 4-subagent hub
-# trace renders ~100 cols wide, see network_canvas.build_hub_topology) must
-# stay legible first. 228 = sidebar (~48 incl. border) + a diagram column
-# wide enough for that hub layout without cramming (~106) + the braille
-# brand panel (BRAND_PANEL_WIDTH=76 incl. border).
-MIN_WIDTH_FOR_BRAND_PANEL = 228
-_BRAND_TEXT = Text(FETCH_BRAND.strip("\n"), style=ACCENT)
+# Inspector column -- third, fixed-width column right of the diagram. Below
+# MIN_WIDTH_FOR_INSPECTOR it hides itself entirely rather than shrink, since
+# the diagram (a 4-subagent hub trace renders ~100 cols wide, see
+# network_canvas.build_hub_topology) must stay legible first. 228 = sidebar
+# (~48 incl. border) + a diagram column wide enough for that hub layout
+# without cramming (~106) + the inspector column (BRAND_PANEL_WIDTH=76 incl.
+# border).
+MIN_WIDTH_FOR_INSPECTOR = 228
 
-# Textual CSS can't interpolate a Python constant into #brand-panel's
+# Textual CSS can't interpolate a Python constant into #inspector-col's
 # `width:` (braces in an f-string would collide with CSS block syntax), so
 # that value is hardcoded there -- this just catches the two drifting apart.
-assert BRAND_PANEL_WIDTH == 76, "update #brand-panel's CSS width alongside brand.BRAND_PANEL_WIDTH"
+assert BRAND_PANEL_WIDTH == 76, "update #inspector-col's CSS width alongside brand.BRAND_PANEL_WIDTH"
 
 
 def _trace_widget_id(trace_id: str) -> str:
