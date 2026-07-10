@@ -1379,33 +1379,51 @@ class LiveApp(App):
         self._trace_state = state
 
         pulse = self._pulse_on and state.pending > 0
+        table_block: Text | None = None
+        hit_regions: dict[str, tuple[int, int, int, int]] = {}
 
         if state.total == 0:
-            renderable = Text("Waiting for messages in this trace…", style="dim")
+            topology = Text("Waiting for messages in this trace…", style="dim")
         elif state.shape == HUB and state.hub:
             if self.view_mode == "tree" and state.tree is not None:
-                renderable = build_hub_tree_diagram(state.tree, self._alias_map)
+                topology = build_hub_tree_diagram(state.tree, self._alias_map)
             else:
-                renderable = build_hub_network_diagram(state, self._alias_map, pulse=pulse)
+                topology, table_block, hit_regions = _hub_diagram_pieces(
+                    state, self._alias_map, pulse=pulse, selected=self._selected_agent
+                )
         else:
-            renderable = build_peer_network_diagram(state.hops, self._alias_map, pulse=pulse)
+            topology, table_block, hit_regions = _peer_diagram_pieces(
+                state.hops, self._alias_map, pulse=pulse, selected=self._selected_agent
+            )
 
-        content.update(self._center_for_panel(renderable))
+        # Diagram and table are two separate, independently top-anchored
+        # widgets stacked in #diagram-col (see CSS) -- centering each
+        # against the panel's real width, rather than baking both into one
+        # combined block, is what pins the diagram to the top with the
+        # table directly beneath it instead of both floating as one unit.
+        content.update(self._center_for_panel(topology))
+        content.hit_regions = hit_regions
+        content.left_pad = self._topology_left_pad(topology)
+        table_content.update(self._center_for_panel(table_block) if table_block is not None else "")
 
         if not pulse_only:
-            if state.shape == HUB and state.hub and self.view_mode != "tree":
-                orch_name = display_name(state.hub, self._alias_map)
-                agent_names = [display_name(leg["subagent"], self._alias_map) for leg in state.legs]
-                self._detail_text = build_hub_detail_summary(
-                    orch_name, state.legs, agent_names, self._active_trace_id
+            summary_content.update(
+                self._center_for_panel(build_trace_summary_line(self._active_trace_id, state, self._alias_map))
+            )
+
+            # Selection is per-agent, not per-trace-dump: nothing selected
+            # yet (or the trace changed under it) shows the empty-state
+            # hint; a click shows that one agent's detail and nothing else.
+            if self._selected_agent is not None:
+                inspector_scroll.set_class(False, "inspector-empty")
+                inspector.update(
+                    build_agent_inspector_text(
+                        self._selected_agent, self._active_trace_id, state, spans, self._alias_map
+                    )
                 )
             else:
-                self._detail_text = (
-                    f"trace {self._active_trace_id[:8]}  ·  "
-                    f"{state.completed} delivered  ·  {state.pending} pending  ·  {state.failed} failed  ·  "
-                    f"[ ] switch trace"
-                )
-            detail.update(self._detail_text)
+                inspector_scroll.set_class(True, "inspector-empty")
+                inspector.update(Text(INSPECTOR_EMPTY_HINT, style="dim"))
 
             trace_list = self.query_one("#trace-list", ListView)
             if self._active_trace_id in self._trace_ids:
