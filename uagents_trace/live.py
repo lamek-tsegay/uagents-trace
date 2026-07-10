@@ -826,6 +826,106 @@ _BRAND_TITLE_LINE = _BRAND_LINES[-1].strip()
 # the brand stays visible in the header even while the panel body is
 # showing inspector detail instead of the empty-state logo.
 _BRAND_MARK_TEXT = Text(f"{_BRAND_LOGO_LINES[0][:11]}  {_BRAND_TITLE_LINE}", style=f"bold {ACCENT}")
+
+
+class SplashScreen(Screen):
+    """Full-screen startup mark, shown once while the main screen mounts
+    underneath. Purely decorative -- dismissing it (by timeout or keypress)
+    never blocks or delays `LiveApp`'s own bootstrap, which starts in
+    parallel via `on_mount`.
+    """
+
+    CSS = """
+    SplashScreen {
+        align: center middle;
+        background: #0a0f0d;
+    }
+    #splash-body {
+        width: auto;
+        height: auto;
+    }
+    #splash-content {
+        width: auto;
+        height: auto;
+        content-align: center middle;
+    }
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._dismissed = False
+
+    def compose(self) -> ComposeResult:
+        # `opacity` is animated on this wrapper, not on the Screen itself --
+        # Screen (like every Widget) exposes `opacity` as a read-only,
+        # ancestor-derived property, so `self.animate("opacity", ...)`
+        # fails with "property 'opacity' has no setter". A plain child
+        # widget's `opacity` is backed by its own (settable) styles, so
+        # animating *it* fades the same pixels with no such conflict --
+        # the Screen's own background stays fully opaque underneath.
+        with Container(id="splash-body"):
+            yield Static(id="splash-content")
+
+    def on_mount(self) -> None:
+        content = self.query_one("#splash-content", Static)
+        width = self.size.width or 80
+
+        if width < SPLASH_MIN_WIDTH_FOR_LOGO:
+            content.update(Text(_BRAND_TITLE_LINE, style=f"bold {ACCENT}"))
+            self.set_timer(SPLASH_HOLD_SECONDS, self._start_fade)
+            return
+
+        # Row 0 draws immediately -- a zero-delay timer trips a division-by-
+        # zero in Textual's timer skip-catchup path under accelerated test
+        # clocks, so the first row is drawn directly instead of scheduled.
+        self._reveal(0)
+        for i in range(1, len(_BRAND_LOGO_LINES)):
+            self.set_timer(i * SPLASH_ROW_STAGGER_SECONDS, lambda upto=i: self._reveal(upto))
+
+        reveal_done = len(_BRAND_LOGO_LINES) * SPLASH_ROW_STAGGER_SECONDS
+        self.set_timer(reveal_done + SPLASH_HOLD_SECONDS, self._start_fade)
+
+    def _reveal(self, upto: int) -> None:
+        if self._dismissed:
+            return
+        content = self.query_one("#splash-content", Static)
+        shown = "\n".join(_BRAND_LOGO_LINES[: upto + 1])
+        is_last = upto == len(_BRAND_LOGO_LINES) - 1
+        text = Text(shown, style=ACCENT)
+        if is_last:
+            text.append("\n\n" + _BRAND_TITLE_LINE, style=f"bold {ACCENT}")
+        content.update(text)
+
+    def _start_fade(self) -> None:
+        if self._dismissed:
+            return
+        body = self.query_one("#splash-body")
+        # `Widget.animate()` targets a plain attribute by name -- for
+        # "opacity" that resolves to the read-only, ancestor-derived
+        # `Widget.opacity` property (no setter), which is the AttributeError
+        # this whole method exists to avoid. `Widget.styles.animate()` is
+        # the one that actually drives the *settable* CSS opacity value.
+        body.styles.animate("opacity", value=0.0, duration=SPLASH_FADE_SECONDS, on_complete=self._finish)
+
+    def _finish(self) -> None:
+        # Reached both by the fade's on_complete and (if a keypress already
+        # dismissed while the fade was mid-flight) potentially again once
+        # that animation finishes ticking -- `_dismissed` makes the second
+        # arrival a no-op so `pop_screen` is never called twice for one
+        # screen (which would pop the main screen underneath it too).
+        if self._dismissed:
+            return
+        self._dismissed = True
+        self.app.pop_screen()
+
+    def on_key(self, event: events.Key) -> None:
+        if self._dismissed:
+            return
+        event.stop()
+        self._dismissed = True
+        self.app.pop_screen()
+
+
 class LiveApp(App):
     """Live network diagram + trace list + rolling message feed."""
 
@@ -1217,4 +1317,5 @@ class LiveApp(App):
 async def run_live(setup: WatchSetup) -> None:
     app = LiveApp(setup)
     await app.run_async()
+
 
