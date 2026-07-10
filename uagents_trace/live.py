@@ -203,7 +203,7 @@ def build_hub_leg_table(legs: list[dict[str, Any]], agent_names: list[str]) -> T
             in_ms = "—"
             total_ms = "—"
             status = f"✗ failed {format_ms(leg.get('dispatch_ms'))}"
-            row_style = ERROR
+            row_style = f"bold {ERROR}"
         elif state == "completed":
             out_ms = format_ms(leg.get("dispatch_ms"))
             in_ms = format_ms(leg.get("reply_ms"))
@@ -248,7 +248,7 @@ def build_peer_leg_table(
     route_in = f"{right_name} → {left_name}"
 
     out_status = "✓ done" if state != "failed" else "✗ failed"
-    out_style = ERROR if state == "failed" else (WARN if state == "pending" else SUCCESS)
+    out_style = f"bold {ERROR}" if state == "failed" else (WARN if state == "pending" else SUCCESS)
     row_out = (
         f"{route_out:<{col_route}}"
         f"{'out':>{col_dir}}"
