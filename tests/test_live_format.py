@@ -380,5 +380,40 @@ class SidebarMarkerMappingTests(unittest.TestCase):
         self.assertNotIn(FAILURE_MARKER, label)
 
 
+class LatencyBarTests(unittest.TestCase):
+    def test_zero_duration_is_all_empty(self):
+        bar = _latency_bar(0)
+        self.assertEqual(bar, LATENCY_BAR_EMPTY * LATENCY_BAR_WIDTH)
+
+    def test_tiny_duration_still_shows_one_tick(self):
+        # A trace that took *some* time shouldn't look identical to zero.
+        bar = _latency_bar(1)
+        self.assertEqual(bar.count(LATENCY_BAR_FILLED), 1)
+
+    def test_duration_at_scale_ceiling_is_full(self):
+        bar = _latency_bar(LATENCY_BAR_SCALE_MS)
+        self.assertEqual(bar, LATENCY_BAR_FILLED * LATENCY_BAR_WIDTH)
+
+    def test_duration_beyond_ceiling_clamps_full(self):
+        bar = _latency_bar(LATENCY_BAR_SCALE_MS * 10)
+        self.assertEqual(bar, LATENCY_BAR_FILLED * LATENCY_BAR_WIDTH)
+
+    def test_bar_always_fixed_width(self):
+        for ms in (0, 1, 250, 999, 2000, 50_000):
+            self.assertEqual(len(_latency_bar(ms)), LATENCY_BAR_WIDTH)
+
+    def test_sidebar_label_includes_bar_alongside_duration_text(self):
+        spans = [
+            span("a", "b", payload_type="Hello", enqueued_at=0, acked_at=10),
+            span("b", "a", payload_type="Reply", enqueued_at=10, acked_at=1200),
+        ]
+        state = build_trace_state(spans)
+        label, _ = sidebar_label("abc12345", state, {"a": "Alice", "b": "Bob"})
+        # The bar replaces the *bare* number -- but the exact duration text
+        # must still be present right next to it, not lost.
+        self.assertIn(_latency_bar(state.duration_ms), label)
+        self.assertIn(format_ms(state.duration_ms), label)
+
+
 if __name__ == "__main__":
     unittest.main()
