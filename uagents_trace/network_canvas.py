@@ -156,7 +156,7 @@ def build_table_legend() -> Text:
     )
 
 
-def _block_width(text: Text) -> int:
+def block_width(text: Text) -> int:
     lines = [line for line in text.plain.split("\n") if line.strip()]
     return max((len(line) for line in lines), default=0)
 
@@ -357,8 +357,8 @@ def assemble_centered_diagram(
     multi-colored legend (e.g. per-status dots) keeps its per-run styles
     instead of collapsing to a single flat color.
     """
-    width = _block_width(topology)
-    width = max(width, _block_width(table), len(legend.plain))
+    width = block_width(topology)
+    width = max(width, block_width(table), len(legend.plain))
     if table_legend is not None:
         width = max(width, len(table_legend.plain))
 
