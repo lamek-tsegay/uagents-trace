@@ -1433,5 +1433,3 @@ class LiveApp(App):
 async def run_live(setup: WatchSetup) -> None:
     app = LiveApp(setup)
     await app.run_async()
-
-
