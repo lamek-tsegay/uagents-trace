@@ -1333,9 +1333,23 @@ class LiveApp(App):
             return renderable
         return center_in_width(renderable, width)
 
+    def _topology_left_pad(self, topology: Text) -> int:
+        """The horizontal padding `_center_for_panel` applied to the
+        topology -- needed to translate a click's widget-local x back into
+        the topology's own (uncentered) coordinate frame that hit_regions
+        are expressed in. Mirrors `center_in_width`'s own padding math.
+        """
+        width = self._diagram_panel_width()
+        if width < 20:
+            return 0
+        return max(0, (width - block_width(topology)) // 2)
+
     async def _refresh_display(self, *, pulse_only: bool = False) -> None:
-        content = self.query_one("#diagram-content", Static)
-        detail = self.query_one("#detail-bar", Static)
+        content = self.query_one("#diagram-content", DiagramCanvas)
+        table_content = self.query_one("#leg-table-content", Static)
+        summary_content = self.query_one("#trace-summary", Static)
+        inspector = self.query_one("#inspector-content", Static)
+        inspector_scroll = self.query_one("#inspector-scroll", VerticalScroll)
 
         if not self._active_trace_id:
             if not pulse_only:
