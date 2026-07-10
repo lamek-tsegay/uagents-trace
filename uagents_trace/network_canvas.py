@@ -264,14 +264,99 @@ def _status_glyph(state: str, pulse: bool) -> tuple[str, str]:
     return STATUS_GLYPH.get(state, ("·", MUTED))
 
 
+def _box_style(state: str) -> str:
+    """Box outline color for one agent, by that agent's own leg state --
+    bold only for a failed leg, so a failure's whole column (box, arrow,
+    glyph) pops together instead of just the arrow underneath it.
+    """
+    if state == "failed":
+        return f"bold {ERROR}"
+    return STATE_STYLE.get(state, WARN)
+
+
+def _ensure_bold(style: str) -> str:
+    return style if style.startswith("bold ") else f"bold {style}"
+
+
+# (x0, y0, x1, y1) box region, y1/x1 exclusive -- the same convention as
+# Python slicing, so `x0 <= x < x1 and y0 <= y < y1` is a hit test.
+BoxRegion = tuple[int, int, int, int]
+
+
+@dataclass
+class HubLayout:
+    """Geometry for one hub topology render -- computed once and shared by
+    the text renderer and the click hit-region builder so a box's drawn
+    position and its clickable region can never drift apart.
+    """
+
+    total_w: int
+    hub_box: BoxRegion
+    hub_cx: int
+    agent_boxes: list[BoxRegion]
+    agent_centers: list[int]
+
+
+def _compute_hub_layout(legs: list[dict[str, Any]], hub_name: str, agent_names: list[str]) -> HubLayout:
+    n = len(legs)
+    box_widths = [max(len(name) + 2, BOX_MIN_WIDTH) for name in agent_names]
+    inner_w = max(len(hub_name) + 2, BOX_MIN_WIDTH)
+    columns, agents_w = _agent_columns(n, box_widths)
+    total_w = max(agents_w, inner_w + 2 + 8)
+
+    hub_x = (total_w - (inner_w + 2)) // 2
+    hub_w = inner_w + 2
+    hub_cx = hub_x + hub_w // 2
+
+    offset = (total_w - agents_w) // 2
+    agent_boxes: list[BoxRegion] = []
+    agent_centers: list[int] = []
+    for i, bw in enumerate(box_widths):
+        x0, cx = columns[i]
+        x0 += offset
+        cx += offset
+        box_w = bw + 2
+        agent_boxes.append((x0, AGENT_ROW, x0 + box_w, AGENT_ROW + 3))
+        agent_centers.append(cx)
+
+    return HubLayout(
+        total_w=total_w,
+        hub_box=(hub_x, HUB_ROW, hub_x + hub_w, HUB_ROW + 3),
+        hub_cx=hub_cx,
+        agent_boxes=agent_boxes,
+        agent_centers=agent_centers,
+    )
+
+
+def build_hub_hit_regions(
+    legs: list[dict[str, Any]],
+    hub_name: str,
+    agent_names: list[str],
+) -> list[BoxRegion]:
+    """Per-leg box regions, same order as `legs`/`agent_names` -- for the
+    live TUI to hit-test a click against. Excludes the hub's own box: the
+    hub isn't a leg, so there's no per-agent detail to show for clicking it.
+    """
+    if not legs:
+        return []
+    return _compute_hub_layout(legs, hub_name, agent_names).agent_boxes
+
+
 def build_hub_topology(
     legs: list[dict[str, Any]],
     hub_name: str,
     agent_names: list[str],
     *,
     pulse: bool = False,
+    selected: str | None = None,
 ) -> Text:
-    """Star topology: boxed hub centered above sub-agents, one arrow each."""
+    """Star topology: boxed hub centered above sub-agents, one arrow each.
+
+    `selected` (an entry of `agent_names`) draws that one agent's box with
+    a double-line border so it reads as "highlighted" even when it's
+    already bold-red for a failed leg, where weight alone wouldn't show a
+    difference.
+    """
     if not legs:
         canvas = Canvas(max(len(hub_name) + 6, 28), 6)
         w = max(len(hub_name) + 2, BOX_MIN_WIDTH)
