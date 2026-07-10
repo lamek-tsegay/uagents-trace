@@ -594,26 +594,37 @@ def sidebar_label(trace_id: str, state: TraceState, alias_map: dict[str, str]) -
         header = "↔".join(names) if len(names) == 2 else (names[0] if names else "?")
 
     duration = format_ms(state.duration_ms)
-    label = f"{trace_id[:6]} · {header} · {state.completed}/{state.total} ✓ · {duration}"
+    bar = _latency_bar(state.duration_ms)
 
     if state.failed and state.failed == state.total:
         style = ERROR
+        marker = FAILURE_MARKER
     elif state.completed == state.total:
         style = SUCCESS
+        marker = ""
+    elif state.failed:
+        style = WARN
+        marker = DEGRADED_MARKER
     else:
         style = WARN
+        marker = ""
+
+    label = f"{trace_id[:6]} · {marker}{header} · {state.completed}/{state.total} ✓ · {bar} {duration}"
     return label, style
 
 
 def _sidebar_markup(label_text: str, style: str) -> str:
     """Rich markup for one sidebar row: the trace id stays neutral/dim
     regardless of outcome, and only the status-bearing remainder (header ·
-    fraction · duration) carries the semantic color.
+    fraction · duration) carries the semantic color. Bold is reserved for
+    a fully-failed trace (style == ERROR) -- everything else, including a
+    fully-delivered trace, recedes at normal weight.
     """
     id_part, sep, rest = label_text.partition(" · ")
     if not sep:
         return f"[{MUTED}]{label_text}[/]"
-    return f"[{MUTED}]{id_part}[/] · [{style}]{rest}[/]"
+    text_style = f"bold {style}" if style == ERROR else style
+    return f"[{MUTED}]{id_part}[/] · [{text_style}]{rest}[/]"
 
 
 class LiveApp(App):
@@ -1007,3 +1018,4 @@ class LiveApp(App):
 async def run_live(setup: WatchSetup) -> None:
     app = LiveApp(setup)
     await app.run_async()
+
