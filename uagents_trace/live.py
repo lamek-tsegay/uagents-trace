@@ -542,6 +542,32 @@ def _span_in_watch(span: dict[str, Any], addresses: set[str] | None) -> bool:
     return span["source_agent"] in addresses or span["dest_agent"] in addresses
 
 
+LATENCY_BAR_WIDTH = 5
+# Ceiling for a "full" bar -- typical demo round trips run well under this,
+# so most bars sit partway full and only genuinely slow traces peg it.
+LATENCY_BAR_SCALE_MS = 2000
+LATENCY_BAR_FILLED = "▮"
+LATENCY_BAR_EMPTY = "▯"
+
+# Sidebar row markers -- a failed-everything trace and a partially-degraded
+# one both read WARN/ERROR via `style`, but only the marker glyph tells them
+# apart from a scan of the list without reading the fraction text.
+FAILURE_MARKER = "⚑ "
+DEGRADED_MARKER = "⚠ "
+
+
+def _latency_bar(duration_ms: int) -> str:
+    """Small inline bar for a trace's duration, scanned at a glance instead
+    of having to read the raw ms/s number -- the number stays alongside it
+    (see `sidebar_label`) so the exact value is still there when it matters.
+    """
+    if duration_ms <= 0:
+        return LATENCY_BAR_EMPTY * LATENCY_BAR_WIDTH
+    filled = round((duration_ms / LATENCY_BAR_SCALE_MS) * LATENCY_BAR_WIDTH)
+    filled = max(1, min(LATENCY_BAR_WIDTH, filled))
+    return LATENCY_BAR_FILLED * filled + LATENCY_BAR_EMPTY * (LATENCY_BAR_WIDTH - filled)
+
+
 def sidebar_label(trace_id: str, state: TraceState, alias_map: dict[str, str]) -> tuple[str, str]:
     """(text, style) for one sidebar row -- a fractional rollup, not a
     binary all-or-nothing ✓/✗, so a hub trace that's 3/4 done doesn't read
