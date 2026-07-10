@@ -364,35 +364,69 @@ def build_hub_topology(
         canvas.text_over(2, 5, "Waiting for dispatch to sub-agents…", MUTED)
         return canvas.to_text()
 
-    n = len(legs)
-    box_widths = [max(len(name) + 2, BOX_MIN_WIDTH) for name in agent_names]
-    inner_w = max(len(hub_name) + 2, BOX_MIN_WIDTH)
-    columns, agents_w = _agent_columns(n, box_widths)
-    total_w = max(agents_w, inner_w + 2 + 8)
-
-    hub_x = (total_w - (inner_w + 2)) // 2
-    canvas = Canvas(total_w, CANVAS_HEIGHT)
-    _, hub_cx = canvas.draw_box(hub_x, HUB_ROW, hub_name)
+    layout = _compute_hub_layout(legs, hub_name, agent_names)
+    canvas = Canvas(layout.total_w, CANVAS_HEIGHT)
+    hub_x, hub_y, _, _ = layout.hub_box
+    canvas.draw_box(hub_x, hub_y, hub_name)
     subtitle = "orchestrator"
-    canvas.text_over(hub_cx - len(subtitle) // 2, SUBTITLE_ROW, subtitle, MUTED)
+    canvas.text_over(layout.hub_cx - len(subtitle) // 2, SUBTITLE_ROW, subtitle, MUTED)
 
-    agent_centers: list[int] = []
     leg_states: list[str] = []
 
     for i, leg in enumerate(legs):
-        x0, agent_cx = columns[i]
-        offset = (total_w - agents_w) // 2
-        x0 += offset
-        agent_cx += offset
-        canvas.draw_box(x0, AGENT_ROW, agent_names[i])
-        agent_centers.append(agent_cx)
-        leg_states.append(leg.get("state", "pending"))
-        glyph, glyph_style = _status_glyph(leg.get("state", "pending"), pulse)
-        canvas.text_over(agent_cx, STATUS_ROW, glyph, glyph_style)
+        x0, y0, _, _ = layout.agent_boxes[i]
+        leg_state = leg.get("state", "pending")
+        is_selected = selected is not None and agent_names[i] == selected
+        box_style = _box_style(leg_state)
+        if is_selected:
+            box_style = _ensure_bold(box_style)
+        canvas.draw_box(x0, y0, agent_names[i], style=box_style, double=is_selected)
+        leg_states.append(leg_state)
+        glyph, glyph_style = _status_glyph(leg_state, pulse)
+        canvas.text_over(layout.agent_centers[i], STATUS_ROW, glyph, glyph_style)
 
-    _draw_hub_arrows(canvas, hub_cx, agent_centers, leg_states, pulse=pulse)
+    _draw_hub_arrows(canvas, layout.hub_cx, layout.agent_centers, leg_states, pulse=pulse)
 
     return canvas.to_text()
+
+
+@dataclass
+class PeerLayout:
+    """Geometry for one peer topology render -- see `HubLayout`."""
+
+    total_w: int
+    left_box: BoxRegion
+    right_box: BoxRegion
+    left_cx: int
+    right_cx: int
+
+
+def _compute_peer_layout(left_name: str, right_name: str) -> PeerLayout:
+    left_w = max(len(left_name) + 2, BOX_MIN_WIDTH)
+    right_w = max(len(right_name) + 2, BOX_MIN_WIDTH)
+    gap = 24
+    total_w = left_w + gap + right_w + 4
+
+    lx = (total_w - left_w - gap - right_w) // 2
+    rx = lx + left_w + gap
+    left_box_w = left_w + 2
+    right_box_w = right_w + 2
+
+    return PeerLayout(
+        total_w=total_w,
+        left_box=(lx, 4, lx + left_box_w, 4 + 3),
+        right_box=(rx, 4, rx + right_box_w, 4 + 3),
+        left_cx=lx + left_box_w // 2,
+        right_cx=rx + right_box_w // 2,
+    )
+
+
+def build_peer_hit_regions(left_name: str, right_name: str) -> tuple[BoxRegion, BoxRegion]:
+    """(left_box, right_box) regions -- for the live TUI to hit-test a click
+    against. Mirrors `build_hub_hit_regions` for the two-agent case.
+    """
+    layout = _compute_peer_layout(left_name, right_name)
+    return layout.left_box, layout.right_box
 
 
 def build_peer_topology(
@@ -401,26 +435,27 @@ def build_peer_topology(
     *,
     state: str = "completed",
     pulse: bool = False,
+    selected: str | None = None,
 ) -> Text:
     """Two boxed agents with a single outbound arrow — details in the table."""
     style = _line_style(state, pulse)
-    left_w = max(len(left_name) + 2, BOX_MIN_WIDTH)
-    right_w = max(len(right_name) + 2, BOX_MIN_WIDTH)
-    gap = 24
-    total_w = left_w + gap + right_w + 4
-    canvas = Canvas(total_w, 11)
+    box_style = _box_style(state)
+    layout = _compute_peer_layout(left_name, right_name)
+    canvas = Canvas(layout.total_w, 11)
 
-    lx = (total_w - left_w - gap - right_w) // 2
-    rx = lx + left_w + gap
-    _, left_cx = canvas.draw_box(lx, 4, left_name)
-    _, right_cx = canvas.draw_box(rx, 4, right_name)
+    lx, ly, _, _ = layout.left_box
+    rx, ry, _, _ = layout.right_box
+    left_style = _ensure_bold(box_style) if selected == left_name else box_style
+    right_style = _ensure_bold(box_style) if selected == right_name else box_style
+    canvas.draw_box(lx, ly, left_name, style=left_style, double=selected == left_name)
+    canvas.draw_box(rx, ry, right_name, style=right_style, double=selected == right_name)
 
-    canvas.hline(left_cx, right_cx - 1, 2, style)
-    canvas.text_over(right_cx, 2, "▶", style)
+    canvas.hline(layout.left_cx, layout.right_cx - 1, 2, style)
+    canvas.text_over(layout.right_cx, 2, "▶", style)
 
     glyph, glyph_style = _status_glyph(state, pulse)
-    canvas.text_over(left_cx, 8, glyph, glyph_style)
-    canvas.text_over(right_cx, 8, glyph, glyph_style)
+    canvas.text_over(layout.left_cx, 8, glyph, glyph_style)
+    canvas.text_over(layout.right_cx, 8, glyph, glyph_style)
 
     return canvas.to_text()
 
