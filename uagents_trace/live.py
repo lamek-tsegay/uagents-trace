@@ -627,6 +627,40 @@ def _sidebar_markup(label_text: str, style: str) -> str:
     return f"[{MUTED}]{id_part}[/] · [{text_style}]{rest}[/]"
 
 
+def _find_span(spans: list[dict[str, Any]], source: str, dest: str, direction: str = "send") -> dict[str, Any] | None:
+    """Earliest raw span for one leg-phase (dispatch or reply) -- spans are
+    already enqueued_at-ordered by the store, so first match is earliest,
+    matching `shape.py`'s own send-side matching rule.
+    """
+    for s in spans:
+        if s["source_agent"] == source and s["dest_agent"] == dest and (s.get("direction") or "send") == direction:
+            return s
+    return None
+
+
+def _relative_ms(t: int, started_at: int) -> int:
+    return max(t - started_at, 0)
+
+
+def _timing_line(label: str, span: dict[str, Any] | None, started_at: int) -> Text | None:
+    """One "enqueued -> acked" line for a single span, relative to trace
+    start -- the per-phase breakdown the leg/route table's rolled-up Total
+    column doesn't show.
+    """
+    if span is None:
+        return None
+    enq_rel = _relative_ms(span["enqueued_at"], started_at)
+    acked_at = span.get("acked_at")
+    if acked_at is None:
+        return Text(f"    {label:<8} +{enq_rel}ms → …", style=MUTED)
+    ack_rel = _relative_ms(acked_at, started_at)
+    delta = max(acked_at - span["enqueued_at"], 0)
+    return Text(f"    {label:<8} +{enq_rel}ms → +{ack_rel}ms   (Δ{delta}ms)", style=MUTED)
+
+
+_LEG_ICON = {"completed": STATE_ICON["delivered"], "failed": STATE_ICON["dropped"], "pending": STATE_ICON["pending"]}
+_LEG_STYLE = {"completed": SUCCESS, "failed": ERROR, "pending": WARN}
+
 class LiveApp(App):
     """Live network diagram + trace list + rolling message feed."""
 
