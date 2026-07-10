@@ -367,6 +367,98 @@ def build_peer_network_diagram(
     return assemble_centered_diagram(diagram, table, legend, table_legend=build_table_legend())
 
 
+def _assemble_table_block(table: Text, legend: Text, table_legend: Text) -> Text:
+    """Table + its legend lines as one block, un-centered -- the piece that
+    renders in the leg/route-table widget, directly beneath (and centered
+    independently from) the topology widget above it.
+    """
+    block = Text()
+    block.append_text(table)
+    block.append_text(table_legend)
+    block.append("\n")
+    block.append_text(legend)
+    return block
+
+
+DiagramPieces = tuple[Text, "Text | None", dict[str, tuple[int, int, int, int]]]
+
+
+def _hub_diagram_pieces(
+    state: TraceState,
+    alias_map: dict[str, str],
+    *,
+    pulse: bool = False,
+    selected: str | None = None,
+) -> DiagramPieces:
+    """(topology, table_block, hit_regions) for a hub trace, split for the
+    live TUI's two-widget layout -- table_block is None when there are no
+    legs yet. `hit_regions` maps each subagent's *address* to its clickable
+    box region; `selected`, if given, is the currently-selected agent's
+    address, highlighted with a double border in the topology.
+    """
+    legs = state.legs
+    orch_name = display_name(state.hub, alias_map)
+    agent_names = [display_name(leg["subagent"], alias_map) for leg in legs]
+    selected_name = display_name(selected, alias_map) if selected else None
+    topology = build_hub_topology(legs, orch_name, agent_names, pulse=pulse, selected=selected_name)
+    if not legs:
+        return topology, None, {}
+    table = build_hub_leg_table(legs, agent_names)
+    table_block = _assemble_table_block(table, build_diagram_legend(), build_table_legend())
+    regions = build_hub_hit_regions(legs, orch_name, agent_names)
+    hit_regions = {leg["subagent"]: region for leg, region in zip(legs, regions)}
+    return topology, table_block, hit_regions
+
+
+def _peer_diagram_pieces(
+    hops: list[Hop],
+    alias_map: dict[str, str],
+    *,
+    pulse: bool = False,
+    selected: str | None = None,
+) -> DiagramPieces:
+    """(topology, table_block, hit_regions) for a peer trace -- mirrors
+    `_hub_diagram_pieces`.
+    """
+    if not hops:
+        return (
+            Text(
+                "  Waiting for messages…\n\n"
+                "  Start your instrumented agents\n"
+                "  in another terminal.",
+                style="dim",
+            ),
+            None,
+            {},
+        )
+
+    outbound, reply = _latest_peer_round_trip(hops)
+    if outbound is None:
+        return Text("  Waiting for messages…", style="dim"), None, {}
+
+    left = display_name(outbound.source, alias_map)
+    right = display_name(outbound.dest, alias_map)
+    leg_state = (
+        "completed"
+        if outbound.state == "delivered" and reply
+        else ("failed" if outbound.state in ("dropped", "timeout") else "pending")
+    )
+    selected_name = display_name(selected, alias_map) if selected else None
+
+    topology = build_peer_topology(left, right, state=leg_state, pulse=pulse, selected=selected_name)
+    table = build_peer_leg_table(
+        left,
+        right,
+        message_ms=outbound.latency_ms,
+        reply_ms=reply.latency_ms if reply else None,
+        state=leg_state,
+    )
+    table_block = _assemble_table_block(table, build_diagram_legend(), build_table_legend())
+    left_box, right_box = build_peer_hit_regions(left, right)
+    hit_regions = {outbound.source: left_box, outbound.dest: right_box}
+    return topology, table_block, hit_regions
+
+
 def _node_status_label(node: TreeNode) -> str:
     if node.state == "completed":
         lat = format_ms(node.latency_ms)
