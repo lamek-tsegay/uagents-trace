@@ -19,8 +19,10 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Footer, Header, Label, ListItem, ListView, RichLog, Static
 
+from .brand import FETCH_BRAND
 from .cli import display_name
 from .network_canvas import (
+    ACCENT,
     ERROR,
     SUCCESS,
     WARN,
@@ -46,6 +48,10 @@ MAX_TRACE_LIST = 25
 TRACE_WIDGET_PREFIX = "trace-"
 
 MUTED = "#6b7280"
+
+# Brand panel pure chrome (see .brand) -- a third, fixed-width column right
+# of the diagram.
+_BRAND_TEXT = Text(FETCH_BRAND.strip("\n"), style=ACCENT)
 
 
 def _trace_widget_id(trace_id: str) -> str:
@@ -515,6 +521,14 @@ class LiveApp(App):
         width: 100%;
         height: auto;
     }
+    #brand-panel {
+        width: 76;
+        height: 100%;
+        border: round #34d399;
+        background: #0d1210;
+        color: #34d399;
+        content-align: center middle;
+    }
     #detail-bar {
         height: 1;
         padding: 0 2;
@@ -583,6 +597,7 @@ class LiveApp(App):
                 yield ListView(id="trace-list")
                 with Vertical(id="diagram-col"):
                     yield Static("", id="diagram-content")
+                yield Static(_BRAND_TEXT, id="brand-panel")
             yield Static("", id="detail-bar")
             yield Static("Live messages", id="events-header")
             yield RichLog(id="events-panel", highlight=False, markup=False, auto_scroll=True)
