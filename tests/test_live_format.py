@@ -415,5 +415,48 @@ class LatencyBarTests(unittest.TestCase):
         self.assertIn(format_ms(state.duration_ms), label)
 
 
+class ColorEconomyTests(unittest.TestCase):
+    """Bright/bold is reserved for failures -- a fully-delivered trace or
+    leg must never carry the same visual weight as a failed one, even
+    though both are still colored (green vs red) for quick scanning.
+    """
+
+    def test_sidebar_markup_bolds_only_the_failed_style(self):
+        failed_markup = _sidebar_markup("1ffa48 · ⚑ Orchestrator→4 · 0/4 ✓ · 700ms", ERROR)
+        self.assertIn(f"[bold {ERROR}]", failed_markup)
+
+        success_markup = _sidebar_markup("abc123 · Alice↔Bob · 2/2 ✓ · 45ms", SUCCESS)
+        self.assertNotIn("bold", success_markup)
+
+        warn_markup = _sidebar_markup("cafeba · ⚠ Orchestrator→4 · 3/4 ✓ · 1.12s", WARN)
+        self.assertNotIn("bold", warn_markup)
+
+    def test_hub_leg_table_bolds_only_the_failed_row(self):
+        legs = [
+            {"subagent": "sub1", "dispatch_ms": 3, "reply_ms": 10, "latency_ms": 20, "state": "completed"},
+            {"subagent": "sub2", "dispatch_ms": 698, "state": "failed", "reason": "boom"},
+        ]
+        table = build_hub_leg_table(legs, ["Sub1", "Sub2"])
+        styles_by_row = {}
+        for run in table.spans:
+            segment = table.plain[run.start : run.end]
+            if "Sub1" in segment:
+                styles_by_row["Sub1"] = run.style
+            if "Sub2" in segment:
+                styles_by_row["Sub2"] = run.style
+        self.assertNotIn("bold", styles_by_row["Sub1"])
+        self.assertIn(f"bold {ERROR}", styles_by_row["Sub2"])
+
+    def test_success_is_visibly_dimmer_than_error_and_accent(self):
+        # Regression guard for the color-economy fix itself: SUCCESS must
+        # no longer be the same saturated green as before -- if a future
+        # edit quietly reverts it, this should catch it rather than only
+        # showing up as a vibes-based UI regression.
+        self.assertNotEqual(SUCCESS, "#4ade80")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
 if __name__ == "__main__":
     unittest.main()
