@@ -81,13 +81,29 @@ class Canvas:
         elif x0 == x1:
             self.vline(x0, y0, y1, style)
 
-    def draw_box(self, x: int, y: int, label: str, style: str | None = None) -> tuple[int, int]:
-        """Draw a 3-line box; return (width, center_x)."""
+    def draw_box(
+        self,
+        x: int,
+        y: int,
+        label: str,
+        style: str | None = None,
+        *,
+        double: bool = False,
+    ) -> tuple[int, int]:
+        """Draw a 3-line box; return (width, center_x). Un-bold by default --
+        bold is reserved for a caller explicitly flagging failure.
+
+        `double` switches to double-line border glyphs -- the visual marker
+        for "this is the currently-selected agent", distinguishable even
+        when a box is already bold-red for a failed leg (where a bolder
+        weight alone wouldn't read as a different thing).
+        """
         w = max(len(label) + 2, BOX_MIN_WIDTH)
-        box_style = style or f"bold {ACCENT}"
-        self.text_over(x, y, "┌" + "─" * w + "┐", box_style)
-        self.text_over(x, y + 1, "│" + label.center(w) + "│", box_style)
-        self.text_over(x, y + 2, "└" + "─" * w + "┘", box_style)
+        box_style = style or ACCENT
+        tl, tr, bl, br, h, v = ("╔", "╗", "╚", "╝", "═", "║") if double else ("┌", "┐", "└", "┘", "─", "│")
+        self.text_over(x, y, tl + h * w + tr, box_style)
+        self.text_over(x, y + 1, v + label.center(w) + v, box_style)
+        self.text_over(x, y + 2, bl + h * w + br, box_style)
         return w, x + w // 2
 
     def to_text(self, default_style: str | None = None) -> Text:
