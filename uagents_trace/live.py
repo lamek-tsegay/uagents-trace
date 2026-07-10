@@ -995,33 +995,53 @@ class LiveApp(App):
     #diagram-col {
         width: 1fr;
         height: 100%;
-        border: round #34d399;
+        border: round #1f3d32;
         background: #0d1210;
-        padding: 1 2;
+        padding: 0 2;
     }
     #diagram-content {
         width: 100%;
         height: auto;
     }
-    #brand-panel {
+    #leg-table-content {
+        width: 100%;
+        height: auto;
+        margin-top: 1;
+    }
+    #trace-summary {
+        width: 100%;
+        height: auto;
+        margin-top: 1;
+    }
+    #inspector-col {
         width: 76;
         height: 100%;
-        border: round #34d399;
-        background: #0d1210;
-        color: #34d399;
-        content-align: center middle;
     }
-    #detail-bar {
+    #inspector-header {
         height: 1;
-        padding: 0 2;
+        padding: 0 1;
+        color: #34d399;
+        background: #111916;
+    }
+    #inspector-scroll {
+        height: 1fr;
+        border: round #1f3d32;
+        background: #0d1210;
+        padding: 1 2;
+        scrollbar-size-vertical: 1;
+    }
+    #inspector-scroll.inspector-empty {
+        align: center middle;
+    }
+    #inspector-content {
+        width: 100%;
+        height: auto;
         color: #6b7280;
-        background: #0a0f0d;
     }
     #events-header {
         height: 1;
         padding: 0 2;
-        color: #34d399;
-        text-style: bold;
+        color: #6b7280;
         background: #0a0f0d;
     }
     #events-panel {
