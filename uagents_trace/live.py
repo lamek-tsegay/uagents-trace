@@ -137,7 +137,8 @@ def _format_payload(hop: Hop) -> str:
 def _styled_icon(state: str) -> Text:
     icon = STATE_ICON.get(state, "·")
     style = STATE_STYLE.get(state, "white")
-    return Text(icon, style=f"bold {style}")
+    weight = "bold " if state == "dropped" else ""
+    return Text(icon, style=f"{weight}{style}")
 
 
 def format_event_line(hop: Hop, alias_map: dict[str, str]) -> Text:
@@ -161,7 +162,8 @@ def format_event_line(hop: Hop, alias_map: dict[str, str]) -> Text:
         parts.append(f"  — {hop.error}")
 
     line = Text.assemble(*parts)
-    line.stylize(STATE_STYLE.get(state, "white"))
+    weight = "bold " if state == "dropped" else ""
+    line.stylize(f"{weight}{STATE_STYLE.get(state, 'white')}")
     return line
 
 
