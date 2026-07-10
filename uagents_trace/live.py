@@ -3,7 +3,7 @@
 Opened after the setup wizard. Polls SQLite and shows agent-to-agent
 messages as they happen — one active trace at a time, bounded feed.
 
-Every widget here (diagram, table, detail bar, feed, sidebar) renders from
+Every widget here (diagram, table, inspector, feed, sidebar) renders from
 a single `shape.TraceState` computed once per refresh (see
 `shape.build_trace_state`) rather than each recomputing status/latency
 from raw spans on its own -- that's what keeps them from disagreeing about
@@ -90,10 +90,10 @@ REPLY_PAYLOAD_TYPES = frozenset(
 )
 
 STATE_STYLE = {
-    "delivered": "green",
-    "timeout": "yellow",
-    "dropped": "red",
-    "pending": "grey58",
+    "delivered": SUCCESS,
+    "timeout": WARN,
+    "dropped": ERROR,
+    "pending": MUTED,
 }
 
 STATE_ICON = {
