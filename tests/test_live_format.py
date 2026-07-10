@@ -325,5 +325,60 @@ class SidebarLabelTests(unittest.TestCase):
         self.assertIn(f"[{WARN}]Orchestrator→4 · 3/4 ✓ · 1.12s[/]", markup)
 
 
+class SidebarMarkerMappingTests(unittest.TestCase):
+    """Rollup state -> sidebar marker: a partially-failed trace must carry
+    a distinct marker from a plain in-progress one even though both read
+    WARN, and a fully-failed trace's marker must differ from both.
+    """
+
+    def _hub_state(self, *, completed, failed, pending):
+        spans = []
+        for i in range(completed):
+            spans.append(span("orch", f"ok{i}", payload_type="Task", enqueued_at=0, acked_at=10))
+            spans.append(span(f"ok{i}", "orch", payload_type="Result", enqueued_at=10, acked_at=20))
+        for i in range(failed):
+            spans.append(
+                span(
+                    "orch", f"bad{i}", payload_type="Task", state="dropped",
+                    error="Unable to resolve destination endpoint", enqueued_at=0, acked_at=700,
+                )
+            )
+        for i in range(pending):
+            spans.append(span("orch", f"pending{i}", payload_type="Task", state="pending", enqueued_at=0, acked_at=None))
+        return build_trace_state(spans, hub_hint="orch")
+
+    def test_fully_failed_gets_failure_marker_not_degraded(self):
+        state = self._hub_state(completed=0, failed=3, pending=0)
+        label, style = sidebar_label("deadbeef", state, {"orch": "Orchestrator"})
+        self.assertEqual(style, ERROR)
+        self.assertIn(FAILURE_MARKER, label)
+        self.assertNotIn(DEGRADED_MARKER, label)
+
+    def test_partial_failure_gets_degraded_marker_not_failure(self):
+        # Some legs ok, one failed -- WARN (not red), but must still be
+        # visually distinct from a trace that's merely still in progress.
+        state = self._hub_state(completed=3, failed=1, pending=0)
+        label, style = sidebar_label("deadbeef", state, {"orch": "Orchestrator"})
+        self.assertEqual(style, WARN)
+        self.assertIn(DEGRADED_MARKER, label)
+        self.assertNotIn(FAILURE_MARKER, label)
+
+    def test_plain_pending_gets_no_marker(self):
+        # Nothing has failed -- just still running. Must not carry either
+        # failure marker, or it'd be indistinguishable from a degraded trace.
+        state = self._hub_state(completed=1, failed=0, pending=1)
+        label, style = sidebar_label("deadbeef", state, {"orch": "Orchestrator"})
+        self.assertEqual(style, WARN)
+        self.assertNotIn(DEGRADED_MARKER, label)
+        self.assertNotIn(FAILURE_MARKER, label)
+
+    def test_fully_delivered_gets_no_marker(self):
+        state = self._hub_state(completed=2, failed=0, pending=0)
+        label, style = sidebar_label("deadbeef", state, {"orch": "Orchestrator"})
+        self.assertEqual(style, SUCCESS)
+        self.assertNotIn(DEGRADED_MARKER, label)
+        self.assertNotIn(FAILURE_MARKER, label)
+
+
 if __name__ == "__main__":
     unittest.main()
