@@ -443,7 +443,10 @@ class SplashBodyStructureTests(unittest.TestCase):
                 screen = app.screen
                 self.assertIsInstance(screen, SplashScreen)
                 if force_full_reveal:
-                    screen._reveal(len(_SPLASH_BODY_LINES) - 1)
+                    # Whichever tier `on_mount` picked for this width, its
+                    # rows are already sitting on `screen._active_rows` --
+                    # reveal all of them, regardless of which tier it is.
+                    screen._reveal(len(screen._active_rows) - 1)
                 content = screen.query_one("#splash-content")
                 return content.content
 
