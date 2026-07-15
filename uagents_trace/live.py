@@ -22,7 +22,7 @@ from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Label, ListItem, ListView, RichLog, Static
 
-from .brand import BRAND_PANEL_WIDTH, FETCH_BRAND
+from .brand import BRAND_PANEL_WIDTH, FETCH_BRAND, FETCH_BRAND_SMALL, HERO_BANNER
 from .cli import display_name
 from .network_canvas import (
     ACCENT,
@@ -813,26 +813,36 @@ def build_trace_summary_line(
 SPLASH_ROW_STAGGER_SECONDS = 0.04
 SPLASH_HOLD_SECONDS = 1.5
 SPLASH_FADE_SECONDS = 0.4
-# Below this width the braille logo (78 cols) wouldn't fit without wrapping
-# into garbage, so the splash degrades to a plain title and skips the
-# row-by-row draw -- there's nothing worth staggering at that size.
-SPLASH_MIN_WIDTH_FOR_LOGO = 84
 
-_BRAND_LINES = FETCH_BRAND.strip("\n").split("\n")
-_BRAND_TITLE_LINE = _BRAND_LINES[-1].strip()
+_FETCH_BRAND_LINES = FETCH_BRAND.strip("\n").split("\n")
+_BRAND_TITLE_LINE = _FETCH_BRAND_LINES[-1].strip()
 # Logo rows only -- the last element of FETCH_BRAND is the wordmark caption,
 # not a braille row, so it's sliced off *before* filtering blanks. Filtering
 # first (the previous approach) doesn't work: the caption is centered with
 # padding spaces, but `"uAgent Trace".strip()` is non-empty, so it would
-# survive the blank filter and get treated as an extra braille row -- which
-# then rendered twice: once as that stray row, once as the title appended
-# below in `_reveal`.
-_BRAND_LOGO_LINES = [line for line in _BRAND_LINES[:-1] if line.strip()]
+# survive the blank filter and get treated as an extra braille row.
+_FETCH_LOGO_LINES = [line for line in _FETCH_BRAND_LINES[:-1] if line.strip()]
 # One-line mark for the inspector header -- the first glyph block of the
 # full logo (row 0, up to the first double-blank run) plus the wordmark, so
 # the brand stays visible in the header even while the panel body is
 # showing inspector detail instead of the empty-state logo.
-_BRAND_MARK_TEXT = Text(f"{_BRAND_LOGO_LINES[0][:11]}  {_BRAND_TITLE_LINE}", style=f"bold {ACCENT}")
+_BRAND_MARK_TEXT = Text(f"{_FETCH_LOGO_LINES[0][:11]}  {_BRAND_TITLE_LINE}", style=f"bold {ACCENT}")
+
+# Splash body: the large "uAgent Trace" ASCII banner (the hero, drawn
+# bold) with the small fetch.ai braille mark centered directly beneath it
+# (the byline, drawn at normal weight) -- one blank row between them, one
+# Static, one render path. There is deliberately no second, separately
+# appended copy of the title text: that duplication (one copy folded into
+# the logo-row miscount above, one appended after) was the original bug.
+_HERO_LINES = HERO_BANNER.strip("\n").split("\n")
+_FETCH_MARK_LINES = FETCH_BRAND_SMALL.strip("\n").split("\n")
+_SPLASH_BODY_LINES = _HERO_LINES + [""] + _FETCH_MARK_LINES
+_SPLASH_HERO_ROW_COUNT = len(_HERO_LINES)
+
+# Below this width the hero wordmark wouldn't fit without wrapping into
+# garbage, so the splash degrades to a plain title and skips the row-by-row
+# draw -- there's nothing worth staggering at that size.
+SPLASH_MIN_WIDTH_FOR_LOGO = max(len(line) for line in _SPLASH_BODY_LINES) + 6
 
 
 class SplashScreen(Screen):
@@ -886,21 +896,31 @@ class SplashScreen(Screen):
         # zero in Textual's timer skip-catchup path under accelerated test
         # clocks, so the first row is drawn directly instead of scheduled.
         self._reveal(0)
-        for i in range(1, len(_BRAND_LOGO_LINES)):
+        for i in range(1, len(_SPLASH_BODY_LINES)):
             self.set_timer(i * SPLASH_ROW_STAGGER_SECONDS, lambda upto=i: self._reveal(upto))
 
-        reveal_done = len(_BRAND_LOGO_LINES) * SPLASH_ROW_STAGGER_SECONDS
+        reveal_done = len(_SPLASH_BODY_LINES) * SPLASH_ROW_STAGGER_SECONDS
         self.set_timer(reveal_done + SPLASH_HOLD_SECONDS, self._start_fade)
 
     def _reveal(self, upto: int) -> None:
+        # The one and only place the splash body is drawn: every row up to
+        # `upto`, hero rows bold and the fetch.ai byline rows (and the
+        # blank separator between them) at normal weight -- never a second
+        # append of the title text after this loop.
         if self._dismissed:
             return
         content = self.query_one("#splash-content", Static)
-        shown = "\n".join(_BRAND_LOGO_LINES[: upto + 1])
-        is_last = upto == len(_BRAND_LOGO_LINES) - 1
-        text = Text(shown, style=ACCENT)
-        if is_last:
-            text.append("\n\n" + _BRAND_TITLE_LINE, style=f"bold {ACCENT}")
+        # `justify="center"` centers each shorter row (the blank separator,
+        # the narrower fetch.ai byline) against the widest row (the hero)
+        # once Textual sizes this auto-width widget to that longest line --
+        # without it, Rich left-aligns every row against column 0 and the
+        # byline reads left-shifted under the hero instead of centered.
+        text = Text(justify="center")
+        for i, line in enumerate(_SPLASH_BODY_LINES[: upto + 1]):
+            if i:
+                text.append("\n")
+            style = f"bold {ACCENT}" if i < _SPLASH_HERO_ROW_COUNT else ACCENT
+            text.append(line, style=style)
         content.update(text)
 
     def _start_fade(self) -> None:
