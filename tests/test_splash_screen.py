@@ -721,6 +721,25 @@ class SplashBodyStructureTests(unittest.TestCase):
         trace_width = max(len(line) - pad for line in top_half)
         self.assertEqual(pad, (uagents_width - trace_width) // 2)
 
+    def test_hero_is_now_taller_than_the_mark_by_design(self):
+        # Stacking the hero into two words roughly halves its width (106 ->
+        # 61 cols, much closer to the mark's 72) at the cost of doubling
+        # its row count (6 -> 12), so the hero is now clearly *taller* than
+        # the 7-row fetch.ai mark -- the reverse of the roughly-equal
+        # height every single-line hero font had. That's an accepted
+        # tradeoff, not a bug: width parity was the point of stacking, and
+        # `test_side_by_side_marks_are_vertically_centered_against_each_other`
+        # (elsewhere in this class) is what actually guards against it
+        # reading lopsided -- the shorter mark must be vertically centered
+        # against the hero's full height, not top-aligned.
+        from uagents_trace.live import _FETCH_LOGO_LINES, _HERO_LINES
+
+        hero_height = len(_HERO_LINES)
+        mark_height = len(_FETCH_LOGO_LINES)
+        self.assertEqual(hero_height, 12)
+        self.assertEqual(mark_height, 7)
+        self.assertGreater(hero_height, mark_height)
+
     def test_hero_banner_has_no_braille_dot_cells(self):
         # Guards against reverting to the illegible braille rasterization:
         # the banner must be built from full block/box-drawing characters,
