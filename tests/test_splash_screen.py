@@ -653,6 +653,38 @@ class SplashBodyStructureTests(unittest.TestCase):
         )
         self.assertEqual(HERO_BANNER.strip("\n"), expected)
 
+    def test_hero_words_are_on_separate_row_groups(self):
+        # The point of stacking: "TRACE" and "UAGENTS" are two distinct
+        # word-blocks, not one run-together line -- the top half of the
+        # hero's rows must match the standalone "Trace" banner (once its
+        # constant center-pad is stripped), and the bottom half must match
+        # the standalone "uAgents" banner exactly, with no row mixing
+        # content from both.
+        top_half = _HERO_LINES[: len(_HERO_LINES) // 2]
+        bottom_half = _HERO_LINES[len(_HERO_LINES) // 2 :]
+
+        expected_trace = [
+            "████████╗██████╗  █████╗  ██████╗███████╗",
+            "╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝",
+            "   ██║   ██████╔╝███████║██║     █████╗",
+            "   ██║   ██╔══██╗██╔══██║██║     ██╔══╝",
+            "   ██║   ██║  ██║██║  ██║╚██████╗███████╗",
+            "   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝",
+        ]
+        expected_uagents = [
+            "██╗   ██╗ █████╗  ██████╗ ███████╗███╗   ██╗████████╗███████╗",
+            "██║   ██║██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝██╔════╝",
+            "██║   ██║███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   ███████╗",
+            "██║   ██║██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ╚════██║",
+            "╚██████╔╝██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ███████║",
+            " ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚══════╝",
+        ]
+
+        pad_left = 10  # (61 - 41) // 2, the constant left-pad every TRACE row shares
+        stripped_top = [line[pad_left:].rstrip() for line in top_half]
+        self.assertEqual(stripped_top, expected_trace)
+        self.assertEqual([l.rstrip() for l in bottom_half], expected_uagents)
+
     def test_hero_banner_has_no_braille_dot_cells(self):
         # Guards against reverting to the illegible braille rasterization:
         # the banner must be built from full block/box-drawing characters,
