@@ -22,7 +22,7 @@ from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Label, ListItem, ListView, RichLog, Static
 
-from .brand import BRAND_PANEL_WIDTH, FETCH_BRAND, FETCH_BRAND_SMALL, HERO_BANNER
+from .brand import BRAND_PANEL_WIDTH, FETCH_BRAND, HERO_BANNER
 from .cli import display_name
 from .network_canvas import (
     ACCENT,
