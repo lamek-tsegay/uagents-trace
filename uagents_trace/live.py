@@ -820,6 +820,48 @@ SPLASH_FADE_SECONDS = 0.4
 # `background: #0a0f0d;` and a hardcoded fade target could.
 SPLASH_BG = "#0a0f0d"
 
+# Discrete color steps for the fade, not an opacity ramp. Two prior opacity
+# attempts (first a wrapping Container's opacity, then a single widget's
+# opacity, both via `Widget.styles.animate`) both looked patchy in a real
+# terminal -- different glyphs landing on visibly different brightness
+# levels within the same frame, rather than dissolving together. The
+# suspected cause is opacity *compositing*: the terminal has to blend each
+# cell's foreground color against the background at whatever intermediate
+# opacity the animator computed for that frame, and different glyph colors
+# (bright green hero, muted divider, dimmer fetch.ai mark) don't necessarily
+# round to the same apparent brightness step when quantized to the
+# terminal's actual color resolution. Feeding the terminal explicit, already
+# -blended hex colors at each step sidesteps that: there's no compositing
+# left for the terminal to get inconsistent about, just a solid color swap.
+# All rows/segments jump to the same step index at the same instant (see
+# `_fade_step`), so the whole lockup still dims as one unit, in lockstep --
+# just via discrete recoloring instead of a continuous opacity blend.
+FADE_STEPS = 12
+SPLASH_FADE_STEP_SECONDS = SPLASH_FADE_SECONDS / FADE_STEPS
+
+
+def _hex_to_rgb(color: str) -> tuple[int, int, int]:
+    h = color.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def _lerp_hex(start: str, end: str, t: float) -> str:
+    """One color `t` of the way (0=start, 1=end) from `start` to `end`."""
+    r0, g0, b0 = _hex_to_rgb(start)
+    r1, g1, b1 = _hex_to_rgb(end)
+    r = round(r0 + (r1 - r0) * t)
+    g = round(g0 + (g1 - g0) * t)
+    b = round(b0 + (b1 - b0) * t)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _fade_color_steps(start: str) -> list[str]:
+    """`FADE_STEPS + 1` colors from `start` (step 0, unchanged) down to
+    `SPLASH_BG` (the last step) -- one such list per lockup color (hero,
+    divider, mark), so every step recolors all of them together.
+    """
+    return [_lerp_hex(start, SPLASH_BG, i / FADE_STEPS) for i in range(FADE_STEPS + 1)]
+
 _FETCH_BRAND_LINES = FETCH_BRAND.strip("\n").split("\n")
 _BRAND_TITLE_LINE = _FETCH_BRAND_LINES[-1].strip()
 # Logo rows only -- the last element of FETCH_BRAND is the wordmark caption,
