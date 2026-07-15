@@ -455,38 +455,146 @@ class SplashBodyStructureTests(unittest.TestCase):
     def _full_reveal_content(self, width: int):
         return self._splash_content(width, force_full_reveal=True)
 
-    def test_full_reveal_renders_splash_body_exactly_once(self):
-        # The strongest form of "no duplicate": the fully-revealed content
-        # must equal the single source-of-truth body line-for-line, with
-        # nothing extra appended after it.
-        text = self._full_reveal_content(120)
-        self.assertEqual(text.plain, "\n".join(_SPLASH_BODY_LINES))
+    def test_full_reveal_renders_side_by_side_body_exactly_once(self):
+        # At or above the side-by-side breakpoint, the fully-revealed
+        # content must equal the side-by-side tier's own source-of-truth
+        # rows line-for-line, with nothing extra appended after them.
+        text = self._full_reveal_content(SPLASH_MIN_WIDTH_SIDE_BY_SIDE)
+        self.assertEqual(text.plain, "\n".join(_SIDE_BY_SIDE_LINES))
+        self.assertEqual(text.plain.count("\n") + 1, len(_SIDE_BY_SIDE_LINES))
 
-    def test_full_reveal_has_no_duplicate_rows(self):
-        # A duplicated title would show up as extra lines beyond the
-        # expected body -- this is the shape the original bug took (one
-        # inside the logo-row loop, one appended after).
-        text = self._full_reveal_content(120)
-        self.assertEqual(text.plain.count("\n") + 1, len(_SPLASH_BODY_LINES))
+    def test_full_reveal_renders_stacked_body_exactly_once(self):
+        # Between the two breakpoints, the fully-revealed content must
+        # equal the stacked tier's rows instead -- not the side-by-side
+        # ones, and not a truncated/duplicated version of either.
+        width = (SPLASH_MIN_WIDTH_STACKED + SPLASH_MIN_WIDTH_SIDE_BY_SIDE) // 2
+        text = self._full_reveal_content(width)
+        self.assertEqual(text.plain, "\n".join(_STACKED_LINES))
+        self.assertEqual(text.plain.count("\n") + 1, len(_STACKED_LINES))
 
-    def test_hero_rows_are_bold_and_byline_rows_are_not(self):
-        # "uAgent Trace" is the hero (bold, dominant); "fetch.ai" is the
-        # subordinate byline (normal weight) directly beneath it.
-        text = self._full_reveal_content(120)
+    def test_side_by_side_rows_share_both_marks(self):
+        # The point of the co-branded lockup: hero and fetch.ai mark sit on
+        # the *same* rows (divided by a vertical rule), not one above the
+        # other. Every row of the side-by-side tier must carry the divider,
+        # including rows where the shorter mark is only blank padding --
+        # that's what makes the rule "span the taller of the two" rather
+        # than stopping short wherever the shorter mark runs out.
+        for row in _SIDE_BY_SIDE_LINES:
+            self.assertIn(_LOCKUP_DIVIDER, row)
+
+    def test_side_by_side_marks_are_vertically_centered_against_each_other(self):
+        # The hero and the fetch.ai mark differ in height, so whichever one
+        # is shorter must be padded top and bottom to center it against the
+        # taller one -- not top- or bottom-aligned, which would leave it
+        # hugging one edge with all the slack on the other side. Written
+        # generically (not assuming which block is shorter): which one that
+        # is has flipped before as the hero's font changed (`standard` was
+        # shorter than the mark; `big` is taller), and this test should
+        # survive that without being rewritten again. An *odd* height
+        # difference can't split into equal integer halves (a leftover row
+        # has to land somewhere), so top/bottom padding is allowed to differ
+        # by at most that one row -- anything more would mean the shorter
+        # block isn't actually centered, just padded on one side.
+        hero_side = [row.split(_LOCKUP_DIVIDER)[0] for row in _SIDE_BY_SIDE_LINES]
+        mark_side = [row.split(_LOCKUP_DIVIDER)[1] for row in _SIDE_BY_SIDE_LINES]
+        height = len(_SIDE_BY_SIDE_LINES)
+
+        def _padding(side: list[str]) -> tuple[int, int]:
+            content_rows = [i for i, r in enumerate(side) if r.strip()]
+            return content_rows[0], height - 1 - content_rows[-1]
+
+        hero_pad_before, hero_pad_after = _padding(hero_side)
+        mark_pad_before, mark_pad_after = _padding(mark_side)
+
+        # Exactly one side should be unpadded (occupies every row) -- the
+        # taller block -- and the other should carry the height difference
+        # as blank padding, split as evenly as an odd remainder allows.
+        hero_unpadded = hero_pad_before == 0 and hero_pad_after == 0
+        mark_unpadded = mark_pad_before == 0 and mark_pad_after == 0
+        self.assertNotEqual(hero_unpadded, mark_unpadded, "exactly one block should be the unpadded, taller one")
+
+        padded_before, padded_after = (mark_pad_before, mark_pad_after) if hero_unpadded else (
+            hero_pad_before,
+            hero_pad_after,
+        )
+        self.assertGreater(padded_before + padded_after, 0)
+        self.assertLessEqual(
+            abs(padded_before - padded_after),
+            1,
+            f"padding is lopsided: {padded_before} rows above vs {padded_after} below",
+        )
+
+    def test_hero_segment_is_bold_and_mark_segment_is_not_in_side_by_side(self):
+        # In the side-by-side tier, boldness (and the bright hero color) is
+        # per-segment (hero bold + bright, divider/mark normal weight and
+        # un-brightened) rather than per-row, since both marks now live on
+        # the same rows.
+        text = self._full_reveal_content(SPLASH_MIN_WIDTH_SIDE_BY_SIDE)
+        lines = text.split("\n")
+        for i, (line, plain_row) in enumerate(zip(lines, _SIDE_BY_SIDE_LINES)):
+            divider_col = plain_row.index(_LOCKUP_DIVIDER)
+            hero_spans = [s for s in line.spans if s.end <= divider_col]
+            mark_spans = [s for s in line.spans if s.start > divider_col]
+            self.assertTrue(hero_spans, f"row {i} has no styled hero segment")
+            self.assertTrue(all("bold" in (s.style or "") for s in hero_spans), f"row {i} hero segment not bold")
+            self.assertTrue(
+                all(SPLASH_HERO_GREEN in (s.style or "") for s in hero_spans),
+                f"row {i} hero segment not rendered in SPLASH_HERO_GREEN",
+            )
+            self.assertTrue(
+                all("bold" not in (s.style or "") for s in mark_spans), f"row {i} mark segment unexpectedly bold"
+            )
+            self.assertTrue(
+                all(SPLASH_HERO_GREEN not in (s.style or "") for s in mark_spans),
+                f"row {i} mark segment unexpectedly rendered in the bright hero color",
+            )
+
+    def test_hero_rows_are_bold_and_mark_rows_are_not_in_stacked(self):
+        # In the stacked tier, hero and mark occupy separate rows, so
+        # boldness (and the bright hero color) is per-row: hero rows bold
+        # and bright, mark rows (and the blank separator) normal weight and
+        # un-brightened.
+        width = (SPLASH_MIN_WIDTH_STACKED + SPLASH_MIN_WIDTH_SIDE_BY_SIDE) // 2
+        text = self._full_reveal_content(width)
         lines = text.split("\n")
         for i, line in enumerate(lines):
-            # Rich stores per-substring style in `.spans`, not on `.style`
-            # (the Text's own base style, which stays unset here).
             is_bold = any("bold" in (span.style or "") for span in line.spans)
-            expected_bold = i < _SPLASH_HERO_ROW_COUNT
-            self.assertEqual(is_bold, expected_bold, f"row {i} bold={is_bold}, expected {expected_bold}")
+            is_bright = any(SPLASH_HERO_GREEN in (span.style or "") for span in line.spans)
+            expected_hero = i < _STACKED_HERO_ROW_COUNT
+            self.assertEqual(is_bold, expected_hero, f"row {i} bold={is_bold}, expected {expected_hero}")
+            self.assertEqual(is_bright, expected_hero, f"row {i} bright={is_bright}, expected {expected_hero}")
+
+    def test_title_only_tier_also_uses_bright_hero_color(self):
+        # The title-only tier is the hero degraded to plain text, not a
+        # different element -- it must keep the same bright color as the
+        # other two tiers rather than quietly falling back to ACCENT. This
+        # tier sets its style via the `Text(..., style=...)` constructor
+        # (a single-run Text, not built up with per-substring `.append`
+        # calls), so Rich stores it as the Text's own base `.style`, not as
+        # an entry in `.spans` -- unlike the other two tiers' rows.
+        text = self._splash_content(SPLASH_MIN_WIDTH_STACKED - 1, force_full_reveal=False)
+        self.assertIn(SPLASH_HERO_GREEN, text.style or "")
+
+    def test_splash_hero_green_is_the_pre_dim_success_value_and_scoped_to_the_hero(self):
+        # SPLASH_HERO_GREEN must be the bright, pre-dim green -- the same
+        # `#4ade80`-family value `wizard.py`'s prompt style still uses --
+        # not an arbitrary new color, and using it must not have touched
+        # the shared, deliberately-dimmed ACCENT/SUCCESS constants that the
+        # rest of the live TUI's color-economy pass depends on staying dim.
+        from uagents_trace import network_canvas
+        from uagents_trace import wizard
+
+        self.assertEqual(SPLASH_HERO_GREEN, "#4ade80")
+        self.assertEqual(SPLASH_HERO_GREEN, wizard.SUCCESS)
+        self.assertNotEqual(SPLASH_HERO_GREEN, network_canvas.SUCCESS)
+        self.assertEqual(network_canvas.SUCCESS, "#3f8f66", "network_canvas.SUCCESS must stay dim")
 
     def test_body_is_centered(self):
-        # `justify="center"` is what centers the narrower byline rows (and
-        # the blank separator) under the wider hero rows once Textual
-        # sizes this auto-width widget to the hero's width -- without it
-        # they'd read left-aligned against column 0 instead of centered.
-        text = self._full_reveal_content(120)
+        # `justify="center"` is what centers the whole lockup block --
+        # whichever tier is active -- against its own widest row, so
+        # shorter rows read centered instead of left-aligned against
+        # column 0.
+        text = self._full_reveal_content(SPLASH_MIN_WIDTH_SIDE_BY_SIDE)
         self.assertEqual(text.justify, "center")
 
     def test_degrade_floor_renders_single_line_title_only(self):
