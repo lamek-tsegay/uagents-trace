@@ -685,6 +685,42 @@ class SplashBodyStructureTests(unittest.TestCase):
         self.assertEqual(stripped_top, expected_trace)
         self.assertEqual([l.rstrip() for l in bottom_half], expected_uagents)
 
+    def test_trace_is_centered_over_uagents_not_left_aligned(self):
+        # A single, constant number of blank columns must precede *every*
+        # "Trace" row -- centering the whole word-block as one rigid unit
+        # against "uAgents"'s width -- rather than each row being centered
+        # independently to its own length. Note this constant is a floor,
+        # not each row's literal leading-space count: "Trace"'s own
+        # letterforms aren't rectangular (the "T"'s crossbar rows start
+        # flush against the glyph's own left edge, but its narrower stem
+        # rows have a few columns of blank space built into the glyph
+        # itself before that), so measuring raw leading-space count per
+        # row would vary for reasons that have nothing to do with
+        # centering -- see the exact row-by-row content already pinned in
+        # `test_hero_words_are_on_separate_row_groups`. The minimum
+        # leading-space count across all rows isolates just the added
+        # centering offset, since the crossbar rows (which have zero
+        # intrinsic indent of their own) reveal it directly.
+        top_half = _HERO_LINES[: len(_HERO_LINES) // 2]
+        leading_spaces = [len(line) - len(line.lstrip(" ")) for line in top_half]
+        pad = min(leading_spaces)
+        self.assertGreater(pad, 0, "TRACE should be padded inward from uAgents's left edge, not flush")
+
+        # That same `pad` must be safe to strip from *every* row as pure
+        # blank space -- i.e. it's a shared left margin every row has in
+        # common, not a per-row recentering that happens to produce a
+        # similar-looking minimum by coincidence.
+        for line in top_half:
+            self.assertEqual(line[:pad], " " * pad, f"row {line!r} doesn't share the {pad}-column left margin")
+
+        # And it must actually be centered against "uAgents", not merely
+        # inset by an arbitrary amount: `pad` should be half the width
+        # difference between the two words' own (unpadded) widths.
+        bottom_half = _HERO_LINES[len(_HERO_LINES) // 2 :]
+        uagents_width = max(len(line) for line in bottom_half)
+        trace_width = max(len(line) - pad for line in top_half)
+        self.assertEqual(pad, (uagents_width - trace_width) // 2)
+
     def test_hero_banner_has_no_braille_dot_cells(self):
         # Guards against reverting to the illegible braille rasterization:
         # the banner must be built from full block/box-drawing characters,
