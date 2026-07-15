@@ -1,12 +1,33 @@
 """Regression tests for `SplashScreen`'s fade-out.
 
-Animating `Screen`/`Widget.opacity` directly crashes: it's a read-only,
-ancestor-derived property (see `Widget.opacity`), not the settable CSS
-value -- that lives on `widget.styles.opacity`. The fix animates a child
-container's `.styles.opacity` instead. These tests run the fade for real
-(through Textual's actual animator) rather than asserting on the code
-directly, so a regression back to animating the wrong attribute is caught
-by an actual crash, the same way the original bug was found.
+Three fixes down this path so far, in order:
+
+1. Animating `Screen`/`Widget.opacity` directly crashes: it's a read-only,
+   ancestor-derived property, not the settable CSS value (`widget.styles
+   .opacity`). Fixed by animating `.styles.opacity` instead.
+2. The splash used to be a Container wrapping a separate content Static,
+   with the *Container's* opacity animated -- two independently-composited
+   widgets, which in practice faded unevenly (some glyphs read as already-
+   dimmed while others were still bright partway through). Fixed by
+   collapsing to a single Static, with the fade animating that same
+   widget's own opacity.
+3. Even a single widget's opacity ramp still looked patchy in a real
+   terminal -- the suspected cause is opacity *compositing*: different
+   glyph colors don't necessarily round to the same apparent brightness
+   when the terminal quantizes an intermediate opacity blend. Fixed by
+   dropping opacity entirely in favor of discrete color-interpolation:
+   `_start_fade`/`_fade_step` recolor the single content widget's Rich
+   `Text` through explicit hex steps from each element's resting color
+   down to the splash background, all elements moving through their own
+   ramp at the same step index in lockstep -- no compositing left for the
+   terminal to get inconsistent about, just solid color swaps.
+
+Only fix 3's smoothness can't be judged here: it needs a real terminal,
+not this harness (see the module using this, and whoever is reading these
+results, for that confirmation). These tests instead pin the parts that
+*are* mechanically verifiable -- which widget the fade touches, that
+opacity is never touched, that all three ramps share one step index, and
+that the sequence still reaches `_finish` and pops the screen.
 """
 
 import os
