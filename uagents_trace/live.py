@@ -17,7 +17,7 @@ from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Label, ListItem, ListView, RichLog, Static
@@ -923,17 +923,26 @@ class SplashScreen(Screen):
     def __init__(self) -> None:
         super().__init__()
         self._dismissed = False
+        # Which tier `on_mount` picked for the current terminal width --
+        # both `_reveal` (which just draws these precomputed, already-
+        # styled rows) and `_fade_step` (which needs to know how to
+        # *rebuild* those rows at a new color, since the fade recolors
+        # what `_reveal` already fully drew) key off this.
+        self._tier: str = "title"
+        self._active_rows: list[Text] = []
 
     def compose(self) -> ComposeResult:
-        # `opacity` is animated on this wrapper, not on the Screen itself --
-        # Screen (like every Widget) exposes `opacity` as a read-only,
-        # ancestor-derived property, so `self.animate("opacity", ...)`
-        # fails with "property 'opacity' has no setter". A plain child
-        # widget's `opacity` is backed by its own (settable) styles, so
-        # animating *it* fades the same pixels with no such conflict --
-        # the Screen's own background stays fully opaque underneath.
-        with Container(id="splash-body"):
-            yield Static(id="splash-content")
+        # A single widget, not a Container wrapping a separate content
+        # widget: every glyph the splash ever draws -- bright hero, muted
+        # divider, calm fetch.ai mark -- is a Rich `Text` segment painted by
+        # this one Static's own render pass. That's what makes the fade
+        # (see `_start_fade`) land on every glyph in lockstep -- animating
+        # a *parent* Container's opacity around a separate child Static
+        # left the fade uneven/patchy in practice (some glyphs read as
+        # already-dimmed while others were still bright partway through),
+        # since the parent and child are two independent paints composited
+        # together rather than one. One widget removes that seam entirely.
+        yield Static(id="splash-content")
 
     def on_mount(self) -> None:
         content = self.query_one("#splash-content", Static)
