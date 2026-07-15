@@ -37,9 +37,14 @@ from unittest import mock
 
 from uagents_trace.live import (
     _BRAND_TITLE_LINE,
-    _SPLASH_BODY_LINES,
-    _SPLASH_HERO_ROW_COUNT,
-    SPLASH_MIN_WIDTH_FOR_LOGO,
+    _HERO_LINES,
+    _LOCKUP_DIVIDER,
+    _SIDE_BY_SIDE_LINES,
+    _STACKED_HERO_ROW_COUNT,
+    _STACKED_LINES,
+    SPLASH_HERO_GREEN,
+    SPLASH_MIN_WIDTH_SIDE_BY_SIDE,
+    SPLASH_MIN_WIDTH_STACKED,
     LiveApp,
     SplashScreen,
 )
