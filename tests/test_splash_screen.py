@@ -742,12 +742,14 @@ class SplashBodyStructureTests(unittest.TestCase):
 
     def test_hero_banner_has_no_braille_dot_cells(self):
         # Guards against reverting to the illegible braille rasterization:
-        # the banner must be built from full block/box-drawing characters,
-        # not U+2800-U+28FF braille dot-cells.
-        for ch in _SPLASH_BODY_LINES[0]:
+        # the banner must be built from figlet strokes, not U+2800-U+28FF
+        # braille dot-cells.
+        from uagents_trace.brand import HERO_BANNER
+
+        for ch in HERO_BANNER:
             self.assertFalse(
                 0x2800 <= ord(ch) <= 0x28FF,
-                f"hero row contains a braille dot-cell {ch!r} -- banner should be block/box-drawing text",
+                f"hero contains a braille dot-cell {ch!r} -- banner should be figlet stroke text",
             )
 
     def test_fetch_mark_is_present_and_centered_below_hero(self):
