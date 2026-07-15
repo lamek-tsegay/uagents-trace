@@ -876,6 +876,14 @@ _FETCH_LOGO_LINES = [line for line in _FETCH_BRAND_LINES[:-1] if line.strip()]
 # showing inspector detail instead of the empty-state logo.
 _BRAND_MARK_TEXT = Text(f"{_FETCH_LOGO_LINES[0][:11]}  {_BRAND_TITLE_LINE}", style=f"bold {ACCENT}")
 
+# Bright, pre-dim-SUCCESS green (the #4ade80-family value wizard.py's
+# prompt style still uses) for the splash hero specifically -- not the
+# shared ACCENT/SUCCESS imported from network_canvas above, which stay dim
+# by design for the color-economy pass across the rest of the live TUI.
+# Scoped to just the splash hero so the rest of the TUI's dim palette is
+# never repointed just because the splash wants one bright moment.
+SPLASH_HERO_GREEN = "#4ade80"
+
 # Splash body: the large "uAgent Trace" ASCII banner (the hero, drawn
 # bold) with the small fetch.ai braille mark centered directly beneath it
 # (the byline, drawn at normal weight) -- one blank row between them, one
