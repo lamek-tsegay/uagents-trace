@@ -876,29 +876,127 @@ _FETCH_LOGO_LINES = [line for line in _FETCH_BRAND_LINES[:-1] if line.strip()]
 # showing inspector detail instead of the empty-state logo.
 _BRAND_MARK_TEXT = Text(f"{_FETCH_LOGO_LINES[0][:11]}  {_BRAND_TITLE_LINE}", style=f"bold {ACCENT}")
 
-# Bright, pre-dim-SUCCESS green (the #4ade80-family value wizard.py's
-# prompt style still uses) for the splash hero specifically -- not the
-# shared ACCENT/SUCCESS imported from network_canvas above, which stay dim
-# by design for the color-economy pass across the rest of the live TUI.
-# Scoped to just the splash hero so the rest of the TUI's dim palette is
-# never repointed just because the splash wants one bright moment.
+# Splash body: a co-branded lockup of the "uAgents Trace" figlet hero (bold)
+# and the full-resolution fetch.ai braille mark (normal weight) -- not the
+# downsampled `FETCH_BRAND_SMALL`, which drops dots and reads broken at any
+# size worth showing. Three degrade tiers, widest to narrowest:
+#
+#   side-by-side -- both marks on shared rows, divided by a thin vertical
+#     rule spanning the taller of the two, each mark centered vertically
+#     against the other. This is the primary, co-branded lockup.
+#   stacked -- too narrow for side-by-side but still roomy: hero on top,
+#     fetch.ai mark centered directly beneath it (one blank row between).
+#   title-only -- below both: a single plain-text line, no row-by-row draw.
+#
+# Whichever tier `SplashScreen.on_mount` selects for the current terminal
+# width, there is exactly one Static and one render path (`_reveal`) drawing
+# it -- no second, separately appended copy of any row.
+#
+# The hero is rendered in the bright, pre-dim SUCCESS green (the
+# `#4ade80`-family value `wizard.py`'s prompt style still uses) rather than
+# the shared `ACCENT`/`SUCCESS` imported from `network_canvas` above --
+# those two stay dim by design (see `network_canvas.SUCCESS`'s own comment)
+# for the color-economy pass across the rest of the live TUI, and must not
+# be repointed just because the splash wants one bright moment. This
+# constant is used *only* by the splash hero below; the fetch.ai mark next
+# to it keeps rendering in `ACCENT`, unbrightened, so the hero reads as the
+# one bright thing on screen against a calm co-mark.
 SPLASH_HERO_GREEN = "#4ade80"
 
-# Splash body: the large "uAgent Trace" ASCII banner (the hero, drawn
-# bold) with the small fetch.ai braille mark centered directly beneath it
-# (the byline, drawn at normal weight) -- one blank row between them, one
-# Static, one render path. There is deliberately no second, separately
-# appended copy of the title text: that duplication (one copy folded into
-# the logo-row miscount above, one appended after) was the original bug.
 _HERO_LINES = HERO_BANNER.strip("\n").split("\n")
-_FETCH_MARK_LINES = FETCH_BRAND_SMALL.strip("\n").split("\n")
-_SPLASH_BODY_LINES = _HERO_LINES + [""] + _FETCH_MARK_LINES
-_SPLASH_HERO_ROW_COUNT = len(_HERO_LINES)
+_HERO_WIDTH = max(len(line) for line in _HERO_LINES)
+_HERO_LINES_PADDED = [line.ljust(_HERO_WIDTH) for line in _HERO_LINES]
 
-# Below this width the hero wordmark wouldn't fit without wrapping into
-# garbage, so the splash degrades to a plain title and skips the row-by-row
-# draw -- there's nothing worth staggering at that size.
-SPLASH_MIN_WIDTH_FOR_LOGO = max(len(line) for line in _SPLASH_BODY_LINES) + 6
+_MARK_WIDTH = max(len(line) for line in _FETCH_LOGO_LINES)
+_MARK_LINES_PADDED = [line.ljust(_MARK_WIDTH) for line in _FETCH_LOGO_LINES]
+
+_LOCKUP_GAP = "  "
+_LOCKUP_DIVIDER = "│"
+_STACKED_HERO_ROW_COUNT = len(_HERO_LINES_PADDED)
+
+
+def _vpad(lines: list[str], width: int, height: int) -> list[str]:
+    """Center `lines` vertically within `height` rows of blank, `width`-wide
+    padding rows -- an odd leftover row goes on the bottom, so a shorter
+    mark reads centered against a taller one rather than top-heavy.
+    """
+    pad = height - len(lines)
+    top = pad // 2
+    bottom = pad - top
+    blank = " " * width
+    return [blank] * top + lines + [blank] * bottom
+
+
+def _build_side_by_side_rows(
+    *,
+    hero_color: str = SPLASH_HERO_GREEN,
+    divider_color: str = MUTED,
+    mark_color: str = ACCENT,
+) -> tuple[list[str], list[Text]]:
+    """(plain rows, styled rows) for the side-by-side tier -- hero (bold)
+    and fetch.ai mark (normal weight) share every row, separated by a
+    divider that spans the full, taller height of the two (padding rows
+    still carry the divider, not just rows where a mark has content).
+
+    Colors are parameters, not hardcoded, so the fade (`_fade_step`) can
+    call this again at each of its discrete color steps -- the layout math
+    is identical either way, only the three style strings change.
+    """
+    height = max(len(_HERO_LINES_PADDED), len(_MARK_LINES_PADDED))
+    hero_rows = _vpad(_HERO_LINES_PADDED, _HERO_WIDTH, height)
+    mark_rows = _vpad(_MARK_LINES_PADDED, _MARK_WIDTH, height)
+
+    plain: list[str] = []
+    styled: list[Text] = []
+    for hero_row, mark_row in zip(hero_rows, mark_rows):
+        plain.append(f"{hero_row}{_LOCKUP_GAP}{_LOCKUP_DIVIDER}{_LOCKUP_GAP}{mark_row}")
+        row = Text()
+        row.append(hero_row, style=f"bold {hero_color}")
+        row.append(_LOCKUP_GAP)
+        row.append(_LOCKUP_DIVIDER, style=divider_color)
+        row.append(_LOCKUP_GAP)
+        row.append(mark_row, style=mark_color)
+        styled.append(row)
+    return plain, styled
+
+
+def _build_stacked_rows(
+    *,
+    hero_color: str = SPLASH_HERO_GREEN,
+    mark_color: str = ACCENT,
+) -> tuple[list[str], list[Text]]:
+    """(plain rows, styled rows) for the stacked tier -- hero rows (bold)
+    directly above the fetch.ai mark rows (normal weight), one blank
+    separator row between them, mirroring `_build_side_by_side_rows`.
+    Colors are parameters for the same reason as there.
+    """
+    plain = _HERO_LINES_PADDED + [""] + _MARK_LINES_PADDED
+    styled = (
+        [Text(line, style=f"bold {hero_color}") for line in _HERO_LINES_PADDED]
+        + [Text("")]
+        + [Text(line, style=mark_color) for line in _MARK_LINES_PADDED]
+    )
+    return plain, styled
+
+
+_SIDE_BY_SIDE_LINES, _SIDE_BY_SIDE_ROWS = _build_side_by_side_rows()
+_STACKED_LINES, _STACKED_ROWS = _build_stacked_rows()
+
+# Precomputed per-step colors for the fade -- one list per lockup color,
+# each `FADE_STEPS + 1` long, step 0 equal to the resting color and the
+# last step equal to `SPLASH_BG`. `_fade_step(i)` indexes all three lists
+# with the same `i`, which is what keeps hero/divider/mark moving through
+# their ramps in lockstep rather than any one of them lagging behind.
+_HERO_FADE_COLORS = _fade_color_steps(SPLASH_HERO_GREEN)
+_DIVIDER_FADE_COLORS = _fade_color_steps(MUTED)
+_MARK_FADE_COLORS = _fade_color_steps(ACCENT)
+
+# Margin beyond each tier's own rendered width so the lockup never touches
+# the terminal edge. Below `SPLASH_MIN_WIDTH_STACKED` there's nothing left
+# to draw row-by-row -- the splash degrades straight to the plain title.
+_SPLASH_MARGIN = 6
+SPLASH_MIN_WIDTH_SIDE_BY_SIDE = max(len(line) for line in _SIDE_BY_SIDE_LINES) + _SPLASH_MARGIN
+SPLASH_MIN_WIDTH_STACKED = max(len(line) for line in _STACKED_LINES) + _SPLASH_MARGIN
 
 
 class SplashScreen(Screen):
@@ -948,8 +1046,18 @@ class SplashScreen(Screen):
         content = self.query_one("#splash-content", Static)
         width = self.size.width or 80
 
-        if width < SPLASH_MIN_WIDTH_FOR_LOGO:
-            content.update(Text(_BRAND_TITLE_LINE, style=f"bold {ACCENT}"))
+        if width >= SPLASH_MIN_WIDTH_SIDE_BY_SIDE:
+            self._tier = "side_by_side"
+            self._active_rows = _SIDE_BY_SIDE_ROWS
+        elif width >= SPLASH_MIN_WIDTH_STACKED:
+            self._tier = "stacked"
+            self._active_rows = _STACKED_ROWS
+        else:
+            # Title-only tier is the hero degraded to plain text, not a
+            # different element -- it keeps the same bright hero color as
+            # the other two tiers rather than falling back to ACCENT.
+            self._tier = "title"
+            content.update(Text(_BRAND_TITLE_LINE, style=f"bold {SPLASH_HERO_GREEN}"))
             self.set_timer(SPLASH_HOLD_SECONDS, self._start_fade)
             return
 
@@ -957,50 +1065,110 @@ class SplashScreen(Screen):
         # zero in Textual's timer skip-catchup path under accelerated test
         # clocks, so the first row is drawn directly instead of scheduled.
         self._reveal(0)
-        for i in range(1, len(_SPLASH_BODY_LINES)):
+        for i in range(1, len(self._active_rows)):
             self.set_timer(i * SPLASH_ROW_STAGGER_SECONDS, lambda upto=i: self._reveal(upto))
 
-        reveal_done = len(_SPLASH_BODY_LINES) * SPLASH_ROW_STAGGER_SECONDS
+        reveal_done = len(self._active_rows) * SPLASH_ROW_STAGGER_SECONDS
         self.set_timer(reveal_done + SPLASH_HOLD_SECONDS, self._start_fade)
 
+    def _render_rows(self, rows: list[Text]) -> Text:
+        """Join `rows` into one centered block -- the one rendering path
+        shared by `_reveal` (a partial prefix, during draw-in) and
+        `_fade_step` (always the full set, during the fade), so there's
+        still only one place that assembles what `#splash-content` shows.
+
+        `justify="center"` centers each shorter row (the blank separator in
+        the stacked tier, or a shorter padding row in the side-by-side
+        tier) against the widest row once Textual sizes this auto-width
+        widget to that longest line -- without it, Rich left-aligns every
+        row against column 0 instead of centering the block as a whole.
+        """
+        text = Text(justify="center")
+        for i, row in enumerate(rows):
+            if i:
+                text.append("\n")
+            text.append_text(row)
+        return text
+
     def _reveal(self, upto: int) -> None:
-        # The one and only place the splash body is drawn: every row up to
-        # `upto`, hero rows bold and the fetch.ai byline rows (and the
-        # blank separator between them) at normal weight -- never a second
-        # append of the title text after this loop.
+        # The one and only place the splash body is *drawn in*: every row
+        # up to `upto`, each already fully styled by whichever tier's
+        # builder produced `_active_rows` (`_build_side_by_side_rows` or
+        # `_build_stacked_rows`) -- never a second append of any row after
+        # this loop.
         if self._dismissed:
             return
         content = self.query_one("#splash-content", Static)
-        # `justify="center"` centers each shorter row (the blank separator,
-        # the narrower fetch.ai byline) against the widest row (the hero)
-        # once Textual sizes this auto-width widget to that longest line --
-        # without it, Rich left-aligns every row against column 0 and the
-        # byline reads left-shifted under the hero instead of centered.
-        text = Text(justify="center")
-        for i, line in enumerate(_SPLASH_BODY_LINES[: upto + 1]):
-            if i:
-                text.append("\n")
-            style = f"bold {ACCENT}" if i < _SPLASH_HERO_ROW_COUNT else ACCENT
-            text.append(line, style=style)
-        content.update(text)
+        content.update(self._render_rows(self._active_rows[: upto + 1]))
 
     def _start_fade(self) -> None:
         if self._dismissed:
             return
-        body = self.query_one("#splash-body")
-        # `Widget.animate()` targets a plain attribute by name -- for
-        # "opacity" that resolves to the read-only, ancestor-derived
-        # `Widget.opacity` property (no setter), which is the AttributeError
-        # this whole method exists to avoid. `Widget.styles.animate()` is
-        # the one that actually drives the *settable* CSS opacity value.
-        body.styles.animate("opacity", value=0.0, duration=SPLASH_FADE_SECONDS, on_complete=self._finish)
+        if self._active_rows:
+            # Force the draw-in stagger to its final, fully-revealed state
+            # before the fade begins. The fade timer is already scheduled
+            # to fire only after every row's own reveal timer (see
+            # `on_mount`: `reveal_done` is `len(rows) * stagger`, strictly
+            # later than the last row's `(len - 1) * stagger`), so this
+            # should already be a no-op in practice -- but making it
+            # explicit here means a future change to those timings can't
+            # quietly start the fade on a partially-drawn body. (Step 0 of
+            # the fade below re-renders the full body anyway, at the
+            # unchanged resting color, so this is now doubly redundant --
+            # but it's kept because a partially-drawn body should never
+            # even momentarily exist between "reveal ends" and "fade
+            # starts", not just be quickly overwritten a moment later.)
+            self._reveal(len(self._active_rows) - 1)
+
+        # Discrete color steps, not an opacity ramp -- see `FADE_STEPS`'s
+        # own comment for why. Step 0 (full brightness, the unchanged
+        # resting color) draws immediately for the same reason row 0 of
+        # the reveal stagger does: a zero-delay timer trips a division-by-
+        # zero in Textual's timer skip-catchup path under accelerated test
+        # clocks.
+        self._fade_step(0)
+        for i in range(1, FADE_STEPS + 1):
+            self.set_timer(i * SPLASH_FADE_STEP_SECONDS, lambda step=i: self._fade_step(step))
+
+    def _fade_step(self, step: int) -> None:
+        # The one and only place the fade is drawn: every glyph the active
+        # tier has -- hero, divider, mark, or (title-only) the plain title
+        # line -- recolored to this same step index at once, via the
+        # *same* per-color ramps (`_HERO_FADE_COLORS` etc.), so hero,
+        # divider, and mark all move through their ramps in lockstep. That
+        # single shared step index, applied to a full re-render rather
+        # than any partial/per-row update, is what keeps the dissolve
+        # reading as one unit instead of a patchwork of independently
+        # fading pieces.
+        if self._dismissed:
+            return
+        content = self.query_one("#splash-content", Static)
+        hero_color = _HERO_FADE_COLORS[step]
+
+        if self._tier == "title":
+            content.update(Text(_BRAND_TITLE_LINE, style=f"bold {hero_color}"))
+        else:
+            mark_color = _MARK_FADE_COLORS[step]
+            if self._tier == "side_by_side":
+                divider_color = _DIVIDER_FADE_COLORS[step]
+                _, rows = _build_side_by_side_rows(
+                    hero_color=hero_color, divider_color=divider_color, mark_color=mark_color
+                )
+            else:
+                _, rows = _build_stacked_rows(hero_color=hero_color, mark_color=mark_color)
+            content.update(self._render_rows(rows))
+
+        if step >= FADE_STEPS:
+            self._finish()
 
     def _finish(self) -> None:
-        # Reached both by the fade's on_complete and (if a keypress already
-        # dismissed while the fade was mid-flight) potentially again once
-        # that animation finishes ticking -- `_dismissed` makes the second
-        # arrival a no-op so `pop_screen` is never called twice for one
-        # screen (which would pop the main screen underneath it too).
+        # Reached from `_fade_step`'s last step. `_dismissed` still guards
+        # this: a keypress can dismiss (see `on_key`) while fade-step
+        # timers for steps not yet fired are still pending -- those timers
+        # go on to call `_fade_step` regardless, but its own `_dismissed`
+        # check stops each one from reaching this method a second time, so
+        # `pop_screen` is never called twice for one screen (which would
+        # pop the main screen underneath it too).
         if self._dismissed:
             return
         self._dismissed = True
