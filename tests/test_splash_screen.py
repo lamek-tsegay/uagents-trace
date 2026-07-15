@@ -752,31 +752,29 @@ class SplashBodyStructureTests(unittest.TestCase):
                 f"hero contains a braille dot-cell {ch!r} -- banner should be figlet stroke text",
             )
 
-    def test_fetch_mark_is_present_and_centered_below_hero(self):
-        # The byline is the fetch.ai mark (still braille -- only the hero
-        # moved off braille), directly beneath the hero with one blank
-        # separator row, and narrower than the hero so it reads as
-        # subordinate rather than competing with it for attention.
-        from uagents_trace.brand import FETCH_BRAND_SMALL
+    def test_fetch_mark_uses_full_resolution_brand_not_downsampled(self):
+        # The mark must be the same full-resolution braille art as the
+        # standalone `FETCH_BRAND` panel (minus its own "uAgents Trace"
+        # caption row, which doesn't belong here now that the hero carries
+        # that text) -- not a downsampled copy, which drops dots and reads
+        # broken at any size worth showing.
+        from uagents_trace.brand import FETCH_BRAND
 
-        expected_mark_lines = FETCH_BRAND_SMALL.strip("\n").split("\n")
-        separator_index = _SPLASH_HERO_ROW_COUNT
-        mark_lines = _SPLASH_BODY_LINES[separator_index + 1 :]
+        brand_lines = FETCH_BRAND.strip("\n").split("\n")
+        expected_mark_lines = [line for line in brand_lines[:-1] if line.strip()]
 
-        self.assertEqual(_SPLASH_BODY_LINES[separator_index], "")
-        self.assertEqual(mark_lines, expected_mark_lines)
+        # Stacked tier: mark rows follow the hero rows and one blank
+        # separator, unpadded (matches the panel's own row content).
+        stacked_mark_lines = _STACKED_LINES[_STACKED_HERO_ROW_COUNT + 1 :]
+        self.assertEqual(stacked_mark_lines, expected_mark_lines)
 
-        hero_width = max(len(line) for line in _SPLASH_BODY_LINES[:separator_index])
-        mark_width = max(len(line) for line in mark_lines)
-        self.assertLess(mark_width, hero_width, "fetch.ai byline should read smaller than the hero, not competing")
-
-        # `justify="center"` (already checked in `test_body_is_centered`)
-        # centers every row -- including these -- against the widest row,
-        # so a narrower byline reads centered under the hero rather than
-        # left-aligned against column 0.
-        text = self._full_reveal_content(120)
-        lines = text.split("\n")
-        self.assertEqual([line.plain for line in lines[separator_index + 1 :]], expected_mark_lines)
+        # Side-by-side tier: the mark occupies the right of the divider on
+        # every row (see test_side_by_side_marks_are_vertically_centered_
+        # against_each_other for the vertical-centering padding), and once
+        # that padding is stripped, its content matches the same art.
+        mark_side = [row.split(_LOCKUP_DIVIDER)[1].strip() for row in _SIDE_BY_SIDE_LINES]
+        mark_side_content = [row for row in mark_side if row]
+        self.assertEqual(mark_side_content, expected_mark_lines)
 
 
 if __name__ == "__main__":
