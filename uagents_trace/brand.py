@@ -13,3 +13,14 @@ FETCH_BRAND = """\
                               uAgent Trace
 """
 BRAND_PANEL_WIDTH = 76
+
+# Small braille "fetch.ai" mark for use as a subordinate byline -- the
+# FETCH_BRAND logo above, downsampled in the braille pixel domain (decode
+# dots back to a bitmap, resize, re-pack) rather than re-rasterized from
+# scratch, so it's the same traced artwork at a smaller scale.
+FETCH_BRAND_SMALL = """\
+⢾⡇⢸⡷⢰⣷⠀⠀⢠⡞⠓⠀⠀⠀⠀⠀⣤⠀⠀⠀⠀⠀⠀⣾⡆⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠷
+⣴⡆⢰⣦⢀⣄⠀⠀⢻⡟⠃⣴⠛⠛⣦⠘⣿⠛⢢⡾⠛⠻⠆⣿⡞⠛⣷⠀⠀⢠⡾⠛⠳⣿⠀⣷
+⣨⡅⠈⡁⠀⡀⠀⠀⢸⡇⠘⣿⠛⠛⣛⠁⣿⠀⠸⣇⠀⢀⡀⣿⡇⠀⣿⠀⣀⢸⣇⠀⢀⣿⠀⣿
+⠙⠃⠈⠁⠈⠋⠀⠀⠘⠃⠀⠈⠛⠛⠁⠀⠈⠛⠁⠙⠛⠋⠁⠙⠁⠀⠙⠈⠛⠀⠙⠛⠋⠛⠀⠋
+"""
