@@ -819,8 +819,15 @@ SPLASH_FADE_SECONDS = 0.4
 SPLASH_MIN_WIDTH_FOR_LOGO = 84
 
 _BRAND_LINES = FETCH_BRAND.strip("\n").split("\n")
-_BRAND_LOGO_LINES = [line for line in _BRAND_LINES if line.strip()]
 _BRAND_TITLE_LINE = _BRAND_LINES[-1].strip()
+# Logo rows only -- the last element of FETCH_BRAND is the wordmark caption,
+# not a braille row, so it's sliced off *before* filtering blanks. Filtering
+# first (the previous approach) doesn't work: the caption is centered with
+# padding spaces, but `"uAgent Trace".strip()` is non-empty, so it would
+# survive the blank filter and get treated as an extra braille row -- which
+# then rendered twice: once as that stray row, once as the title appended
+# below in `_reveal`.
+_BRAND_LOGO_LINES = [line for line in _BRAND_LINES[:-1] if line.strip()]
 # One-line mark for the inspector header -- the first glyph block of the
 # full logo (row 0, up to the first double-blank run) plus the wordmark, so
 # the brand stays visible in the header even while the panel body is
