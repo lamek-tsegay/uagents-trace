@@ -814,6 +814,12 @@ SPLASH_ROW_STAGGER_SECONDS = 0.04
 SPLASH_HOLD_SECONDS = 1.5
 SPLASH_FADE_SECONDS = 0.4
 
+# Splash screen background -- also the fade's target color (see
+# `_fade_step` below). Kept as its own constant, interpolated into the CSS
+# below via an f-string, so the two can't drift apart the way a hardcoded
+# `background: #0a0f0d;` and a hardcoded fade target could.
+SPLASH_BG = "#0a0f0d"
+
 _FETCH_BRAND_LINES = FETCH_BRAND.strip("\n").split("\n")
 _BRAND_TITLE_LINE = _FETCH_BRAND_LINES[-1].strip()
 # Logo rows only -- the last element of FETCH_BRAND is the wordmark caption,
