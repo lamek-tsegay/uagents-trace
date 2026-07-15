@@ -368,23 +368,48 @@ class SplashAlwaysPresentTests(unittest.TestCase):
 
 
 class SplashBodyStructureTests(unittest.TestCase):
-    """Regression coverage for the inverted hero/byline redesign: "uAgent
-    Trace" as a large ASCII banner (the hero, bold) with the fetch.ai
-    braille mark small underneath (the byline, normal weight) -- and,
-    critically, exactly one rendering of that body. The original bug
-    rendered the title text twice at once: once folded into the logo-row
-    list (because `"uAgent Trace".strip()` is truthy, so the centered
-    caption row survived a filter meant to drop only blank rows) and once
-    appended again after. Comparing the fully-revealed content against
-    `_SPLASH_BODY_LINES` exactly -- not just "does it crash" -- is what
-    catches that shape of regression: an extra, duplicated row sneaking
-    back into the body.
+    """Regression coverage for the co-branded, side-by-side lockup: the
+    "uAgents Trace" figlet hero (bold) and the full-resolution fetch.ai
+    braille mark (normal weight) on shared rows, divided by a thin vertical
+    rule -- with a three-tier degrade (side-by-side -> stacked -> title-only)
+    as the terminal narrows, and critically exactly one rendering of
+    whichever tier is active. The original bug (before the side-by-side
+    redesign) rendered the title text twice at once: once folded into the
+    logo-row list (because `"uAgent Trace".strip()` is truthy, so the
+    centered caption row survived a filter meant to drop only blank rows)
+    and once appended again after. Comparing the fully-revealed content
+    against the active tier's own source-of-truth line list exactly -- not
+    just "does it crash" -- is what catches that shape of regression: an
+    extra, duplicated row sneaking back into the body.
 
-    A second bug fixed since: the hero was originally rasterized into
-    braille too, which only gives each letter a couple of 2x4 dot-cells at
-    a legible width and reads as noise, not text. `HERO_BANNER` (brand.py)
-    replaces that with a figlet-style block-letter banner (ANSI Shadow),
-    solid-filled per character cell instead of sub-cell dots.
+    Earlier bugs/iterations fixed along the way: the hero was originally
+    rasterized into braille (illegible at letter size), then several
+    mixed-case figlet fonts were tried chasing a lowercase "u" -- `smslant`
+    (too thin/disconnected), `standard` (upright but still hollow), `big`
+    (heavier, but still visually lighter than the fetch.ai mark's solid
+    braille fill). `HERO_BANNER` (brand.py) settled on ANSI Shadow -- solid,
+    double-line block glyphs, closest in visual weight to the mark, at the
+    cost of being all-caps (this font has no lowercase forms; an accepted
+    tradeoff) -- but rendered as a single line it was 106 columns, far
+    wider than the mark's 72, forcing a lopsided lockup and a very wide
+    side-by-side breakpoint. It's now rendered as two words stacked
+    vertically ("TRACE" above "UAGENTS", each its own ANSI Shadow banner,
+    "TRACE" horizontally centered over "UAGENTS" by a single constant
+    left-pad applied to every one of its rows), which roughly halves the
+    width (61 cols) at the cost of roughly doubling the row count (12 vs
+    the mark's 7) -- a much better width match, and the shorter mark is
+    what gets vertically centered against the hero's height now, not the
+    other way around. The hero is rendered in `SPLASH_HERO_GREEN`, a
+    bright, pre-dim green scoped to just the splash hero -- not the shared,
+    deliberately-dimmed `ACCENT`/`SUCCESS` used everywhere else in the live
+    TUI -- so the hero reads as the one bright thing on screen next to a
+    calm, unbrightened fetch.ai mark. The mark itself uses the
+    full-resolution `FETCH_BRAND` art, never the deleted downsampled copy
+    (which used to drop dots and read broken). Across all of these font
+    swaps the side-by-side lockup structure itself -- hero and mark on
+    shared rows, divided by a vertical rule, each centered vertically
+    against the other -- has never changed; only the hero's own rendering
+    has.
     """
 
     def setUp(self):
