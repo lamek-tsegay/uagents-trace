@@ -598,29 +598,43 @@ class SplashBodyStructureTests(unittest.TestCase):
         self.assertEqual(text.justify, "center")
 
     def test_degrade_floor_renders_single_line_title_only(self):
-        # Below SPLASH_MIN_WIDTH_FOR_LOGO the splash shows only the plain
-        # title -- one line, no braille body, no duplicate. This path
-        # never calls `_reveal` at all (it returns straight out of
-        # `on_mount`), so the content is already final after mount.
-        text = self._splash_content(SPLASH_MIN_WIDTH_FOR_LOGO - 1, force_full_reveal=False)
+        # Below SPLASH_MIN_WIDTH_STACKED the splash shows only the plain
+        # title -- one line, no lockup body, no duplicate. This path never
+        # calls `_reveal` at all (it returns straight out of `on_mount`),
+        # so the content is already final after mount.
+        text = self._splash_content(SPLASH_MIN_WIDTH_STACKED - 1, force_full_reveal=False)
         self.assertEqual(text.plain, _BRAND_TITLE_LINE)
+        self.assertEqual(_BRAND_TITLE_LINE, "uAgents Trace")
         self.assertNotIn("\n", text.plain)
 
-    def test_full_body_renders_at_several_wide_terminal_widths(self):
-        # The hero/byline unit must draw in full (not degrade, not crash,
-        # not truncate) at a range of terminal widths at or above the
-        # degrade floor.
-        for width in (SPLASH_MIN_WIDTH_FOR_LOGO, SPLASH_MIN_WIDTH_FOR_LOGO + 20, 160):
+    def test_each_degrade_tier_renders_at_its_own_width(self):
+        # Each tier must draw in full (not degrade, not crash, not
+        # truncate) somewhere within its own width band, and exactly the
+        # tier that width band implies -- not one of the others.
+        cases = [
+            (SPLASH_MIN_WIDTH_SIDE_BY_SIDE, _SIDE_BY_SIDE_LINES),
+            (SPLASH_MIN_WIDTH_SIDE_BY_SIDE + 30, _SIDE_BY_SIDE_LINES),
+            (SPLASH_MIN_WIDTH_STACKED, _STACKED_LINES),
+            (SPLASH_MIN_WIDTH_SIDE_BY_SIDE - 1, _STACKED_LINES),
+        ]
+        for width, expected_lines in cases:
             with self.subTest(width=width):
                 text = self._full_reveal_content(width)
-                self.assertEqual(text.plain, "\n".join(_SPLASH_BODY_LINES))
+                self.assertEqual(text.plain, "\n".join(expected_lines))
 
-    def test_hero_banner_is_the_expected_ansi_shadow_art(self):
+    def test_hero_banner_is_the_expected_stacked_ansi_shadow_art(self):
         # Hardcoded against the actual generated art (not against
-        # `_SPLASH_BODY_LINES`, which would just be comparing the banner to
-        # itself) -- this is the regression net for the banner's *content*:
-        # if `HERO_BANNER` in brand.py is ever hand-edited or regenerated
-        # with a different font/string and silently breaks, this fails.
+        # `_SIDE_BY_SIDE_LINES`/`_STACKED_LINES`, which would just be
+        # comparing the banner to itself) -- this is the regression net for
+        # the banner's *content*: if `HERO_BANNER` in brand.py is ever
+        # hand-edited or regenerated differently and silently breaks, this
+        # fails. Generated as two separate word banners --
+        # `pyfiglet.figlet_format("Trace", font="ansi_shadow", width=200)`
+        # and `("uAgents", font="ansi_shadow", width=200)` -- each with its
+        # trailing all-blank filler row dropped, "Trace" (the narrower
+        # word) center-padded to "uAgents"'s width by a single constant
+        # left-pad applied to every one of its rows, then stacked "Trace"
+        # directly above "uAgents" with no separator row between them.
         from uagents_trace.brand import HERO_BANNER
 
         expected = (
