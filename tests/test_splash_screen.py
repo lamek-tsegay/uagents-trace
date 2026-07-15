@@ -148,6 +148,154 @@ class SplashScreenFadeTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_splash_is_a_single_content_widget_not_a_wrapped_container(self):
+        # The patchy-fade bug came from a Container wrapping a separate
+        # content Static -- two independently-composited widgets, so
+        # animating the Container's opacity didn't uniformly dim the
+        # Static's glyphs inside it. The fix removes that wrapper: there
+        # must be no `#splash-body` (or any other) container between the
+        # screen and `#splash-content` -- it's a direct child of the screen.
+        import asyncio
+
+        async def run():
+            await init_db(self.db_path)
+            app = _make_app(self.db_path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause()
+                screen = app.screen
+                self.assertIsInstance(screen, SplashScreen)
+                self.assertEqual(len(screen.query("#splash-body")), 0)
+                content = screen.query_one("#splash-content")
+                self.assertIs(content.parent, screen)
+
+        asyncio.run(run())
+
+    def test_fade_recolors_the_single_content_widget_never_opacity(self):
+        # The fade no longer animates opacity at all -- two prior opacity
+        # attempts (a wrapping Container's, then a single widget's) both
+        # looked patchy in a real terminal. It now steps `#splash-content`'s
+        # own rendered Rich `Text` through explicit, progressively-darker
+        # hex colors down to the splash background, applied to the *same*
+        # single widget every draw-in row already shares -- never touching
+        # `.styles.opacity`, which stays 1.0 throughout.
+        import asyncio
+
+        async def run():
+            await init_db(self.db_path)
+            app = _make_app(self.db_path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause()
+                screen = app.screen
+                content = screen.query_one("#splash-content")
+                self.assertEqual(screen._tier, "stacked", "test assumes this width lands in the stacked tier")
+
+                screen._fade_step(0)
+                start_style = content.content.spans[0].style
+                self.assertIn(SPLASH_HERO_GREEN, start_style)
+                self.assertEqual(content.styles.opacity, 1.0)
+
+                mid_step = live_mod.FADE_STEPS // 2
+                screen._fade_step(mid_step)
+                mid_style = content.content.spans[0].style
+                self.assertNotIn(SPLASH_HERO_GREEN, mid_style)
+                self.assertNotEqual(mid_style, start_style)
+                self.assertEqual(content.styles.opacity, 1.0)
+
+                screen._fade_step(live_mod.FADE_STEPS)
+                end_style = content.content.spans[0].style
+                self.assertIn(live_mod.SPLASH_BG, end_style)
+                self.assertEqual(content.styles.opacity, 1.0)
+
+        asyncio.run(run())
+
+    def test_fade_step_colors_move_hero_divider_and_mark_in_lockstep(self):
+        # Every step must recolor the whole lockup at once -- hero, divider,
+        # and mark all indexed by the *same* step, not three independent
+        # ramps that could drift out of sync with each other. Checked on
+        # the side-by-side tier specifically, since it's the one tier where
+        # hero and mark actually share rows (and so could visibly desync).
+        import asyncio
+
+        async def run():
+            await init_db(self.db_path)
+            app = _make_app(self.db_path)
+            async with app.run_test(size=(160, 40)) as pilot:
+                await pilot.pause()
+                screen = app.screen
+                content = screen.query_one("#splash-content")
+                self.assertEqual(
+                    screen._tier, "side_by_side", "test assumes this width lands in the side-by-side tier"
+                )
+
+                step = live_mod.FADE_STEPS // 2
+                screen._fade_step(step)
+                hero_span, divider_span, mark_span = content.content.spans[:3]
+                self.assertEqual(hero_span.style, f"bold {live_mod._HERO_FADE_COLORS[step]}")
+                self.assertEqual(divider_span.style, live_mod._DIVIDER_FADE_COLORS[step])
+                self.assertEqual(mark_span.style, live_mod._MARK_FADE_COLORS[step])
+
+        asyncio.run(run())
+
+    def test_fade_step_zero_is_the_resting_color_and_last_step_is_background(self):
+        # Step 0 must be visually identical to the pre-fade resting state
+        # (no visible jump when the fade begins), and the last step must
+        # land exactly on the splash background -- the frame right before
+        # `_finish` pops the screen should already read as "gone", not
+        # merely "dimmer".
+        self.assertEqual(live_mod._HERO_FADE_COLORS[0], SPLASH_HERO_GREEN)
+        self.assertEqual(live_mod._HERO_FADE_COLORS[live_mod.FADE_STEPS], live_mod.SPLASH_BG)
+        self.assertEqual(live_mod._MARK_FADE_COLORS[live_mod.FADE_STEPS], live_mod.SPLASH_BG)
+        self.assertEqual(live_mod._DIVIDER_FADE_COLORS[live_mod.FADE_STEPS], live_mod.SPLASH_BG)
+
+    def test_last_fade_step_finishes_and_pops_the_splash(self):
+        # The fade must still eventually dismiss the splash -- reaching
+        # `FADE_STEPS` is what used to be the animation's `on_complete`.
+        import asyncio
+
+        async def run():
+            await init_db(self.db_path)
+            app = _make_app(self.db_path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause()
+                screen = app.screen
+                self.assertIsInstance(app.screen, SplashScreen)
+
+                screen._fade_step(live_mod.FADE_STEPS)
+                await pilot.pause()
+
+                self.assertEqual(len(app.screen_stack), 1)
+                self.assertNotIsInstance(app.screen, SplashScreen)
+
+        asyncio.run(run())
+
+    def test_start_fade_forces_full_reveal_before_animating(self):
+        # A dismiss mid-stagger (or a future timing change that lets the
+        # fade timer fire before the last row's own reveal timer) must
+        # never start the fade on a partially-drawn body -- `_start_fade`
+        # forces the final, fully-revealed state itself before animating
+        # opacity, regardless of how much of the stagger had actually run.
+        import asyncio
+
+        async def run():
+            await init_db(self.db_path)
+            app = _make_app(self.db_path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause()
+                screen = app.screen
+                self.assertTrue(screen._active_rows, "expected a row-drawing tier at this width")
+
+                # Simulate a mid-stagger state: only the first row drawn.
+                screen._reveal(0)
+                content = screen.query_one("#splash-content")
+                partial = content.content.plain
+                full_body = "\n".join(row.plain for row in screen._active_rows)
+                self.assertNotEqual(partial, full_body, "test setup didn't actually leave the body partial")
+
+                screen._start_fade()
+                self.assertEqual(content.content.plain, full_body)
+
+        asyncio.run(run())
+
 
 class SplashAlwaysPresentTests(unittest.TestCase):
     """The splash must push on *every* launch, not just the first -- a
