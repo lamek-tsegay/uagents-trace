@@ -858,20 +858,16 @@ class SplashScreen(Screen):
     parallel via `on_mount`.
     """
 
-    CSS = """
-    SplashScreen {
+    CSS = f"""
+    SplashScreen {{
         align: center middle;
-        background: #0a0f0d;
-    }
-    #splash-body {
-        width: auto;
-        height: auto;
-    }
-    #splash-content {
+        background: {SPLASH_BG};
+    }}
+    #splash-content {{
         width: auto;
         height: auto;
         content-align: center middle;
-    }
+    }}
     """
 
     def __init__(self) -> None:
