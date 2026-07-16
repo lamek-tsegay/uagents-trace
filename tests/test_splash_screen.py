@@ -399,11 +399,11 @@ class SplashBodyStructureTests(unittest.TestCase):
     width (61 cols) at the cost of roughly doubling the row count (12 vs
     the mark's 7) -- a much better width match, and the shorter mark is
     what gets vertically centered against the hero's height now, not the
-    other way around. The hero is rendered in `SPLASH_HERO_GREEN`, a
-    bright, pre-dim green scoped to just the splash hero -- not the shared,
-    deliberately-dimmed `ACCENT`/`SUCCESS` used everywhere else in the live
-    TUI -- so the hero reads as the one bright thing on screen next to a
-    calm, unbrightened fetch.ai mark. The mark itself uses the
+    other way around. The hero is rendered in `SPLASH_HERO_GREEN`, the same
+    bright green now shared by `SUCCESS` (see the live TUI's full
+    green-unification) -- not the separate, calmer `ACCENT` -- so the hero
+    reads as the one bright thing on screen next to a calm, unbrightened
+    fetch.ai mark. The mark itself uses the
     full-resolution `FETCH_BRAND` art, never the deleted downsampled copy
     (which used to drop dots and read broken). Across all of these font
     swaps the side-by-side lockup structure itself -- hero and mark on
@@ -575,19 +575,22 @@ class SplashBodyStructureTests(unittest.TestCase):
         text = self._splash_content(SPLASH_MIN_WIDTH_STACKED - 1, force_full_reveal=False)
         self.assertIn(SPLASH_HERO_GREEN, text.style or "")
 
-    def test_splash_hero_green_is_the_pre_dim_success_value_and_scoped_to_the_hero(self):
-        # SPLASH_HERO_GREEN must be the bright, pre-dim green -- the same
-        # `#4ade80`-family value `wizard.py`'s prompt style still uses --
-        # not an arbitrary new color, and using it must not have touched
-        # the shared, deliberately-dimmed ACCENT/SUCCESS constants that the
-        # rest of the live TUI's color-economy pass depends on staying dim.
+    def test_splash_hero_green_is_shared_with_success_but_not_accent(self):
+        # SPLASH_HERO_GREEN must be the bright green -- the same `#4ade80`
+        # value `wizard.py`'s prompt style still uses. As of the live TUI's
+        # full green-unification, `network_canvas.SUCCESS` was deliberately
+        # repointed to this same value too (see its own comment) -- there
+        # is exactly one green across the live TUI now. `network_canvas
+        # .ACCENT` stays its own, separate calm shade -- full unification
+        # never covered it (wizard.py's CLI prompts and the splash's own
+        # fetch.ai co-mark below still want the calmer color).
         from uagents_trace import network_canvas
         from uagents_trace import wizard
 
         self.assertEqual(SPLASH_HERO_GREEN, "#4ade80")
         self.assertEqual(SPLASH_HERO_GREEN, wizard.SUCCESS)
-        self.assertNotEqual(SPLASH_HERO_GREEN, network_canvas.SUCCESS)
-        self.assertEqual(network_canvas.SUCCESS, "#3f8f66", "network_canvas.SUCCESS must stay dim")
+        self.assertEqual(SPLASH_HERO_GREEN, network_canvas.SUCCESS)
+        self.assertNotEqual(SPLASH_HERO_GREEN, network_canvas.ACCENT)
 
     def test_body_is_centered(self):
         # `justify="center"` is what centers the whole lockup block --
