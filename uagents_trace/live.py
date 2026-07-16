@@ -1373,6 +1373,58 @@ def _shimmer_logo_text(tick: int) -> Text:
     return text
 
 
+STAR_URL = "https://github.com/fetchai/uAgents"
+
+
+# Alternating glyph/color pairs for the star-link's localized celebration
+# flash (see _star_link_text's celebration_frame) -- frame parity picks
+# both, so consecutive frames read as a flash instead of a static image.
+_CELEBRATION_GLYPHS = ["✨ ★", "⋆ ✦"]
+
+
+def _star_link_text(*, celebration_frame: int | None = None) -> Text:
+    """Clickable "star the repo" line. A real `Style(link=...)` object, not
+    a `"...link=URL"` style *string* -- Rich's string-style parser (what
+    `Text.append(style=str)` normally goes through) has no syntax for a
+    link attribute at all, and raises trying to parse one; the link has to
+    be built as an actual `Style` object instead. It makes this a real
+    OSC 8 hyperlink -- cmd/ctrl-click opens it directly in terminals that
+    render one (iTerm2/Kitty/WezTerm). Some terminals (VS Code's
+    integrated one, notably) don't act on OSC 8 links at all -- there's no
+    code fix for that, it's the terminal's own choice -- so the literal URL
+    is *always* printed on its own line right below, never replaced by
+    anything else (celebration included, see below), so the destination is
+    always there to copy-paste regardless of what the terminal does with
+    the link above it.
+
+    `celebration_frame`, if not `None`, replaces just the clickable label
+    above with a brief flashing thank-you instead of the panel-wide
+    takeover this used to be -- everything else in the empty state (logo,
+    stat blocks, and this line's own URL right below) stays exactly where
+    it is and fully visible throughout, per the user's own complaint that
+    the old full-panel version wiped out what they were looking at. This
+    is *separate* from -- and in addition to -- `InspectorCanvas`'s own
+    click detection (`star_link_rows`), which is what actually drives the
+    celebration; a terminal's native OSC 8 handling firing (or not)
+    doesn't affect it either way.
+    """
+    text = Text(justify="center")
+    if celebration_frame is None:
+        text.append("★ Star uAgents on GitHub", style=Style(bold=True, color=GREEN, link=STAR_URL))
+    else:
+        glyphs = _CELEBRATION_GLYPHS[celebration_frame % len(_CELEBRATION_GLYPHS)]
+        color = GREEN if celebration_frame % 2 == 0 else WARN
+        text.append(f"{glyphs}  thanks for the click!  {glyphs}", style=f"bold {color}")
+    text.append("\n")
+    text.append(STAR_URL, style=Style(dim=True, link=STAR_URL))
+    return text
+
+
+# ~1.5s total at SHIMMER_INTERVAL_SECONDS (0.15s/tick, see LiveApp) -- a
+# brief flash, not the old full-panel takeover's several-second hold.
+CELEBRATION_TICKS = 10
+
+
 class DiagramCanvas(Static):
     """The diagram widget -- hit-tests clicks against the agent box regions
     computed alongside the last render (see `LiveApp._refresh_display`) and
@@ -1407,6 +1459,32 @@ class DiagramCanvas(Static):
                 event.stop()
                 self.post_message(self.AgentClicked(agent))
                 return
+
+
+class InspectorCanvas(Static):
+    """The inspector's content widget -- hit-tests clicks against the
+    empty-state star link's row range (set alongside each render, see
+    `LiveApp._render_inspector_empty_state`) and posts `StarLinkClicked`,
+    mirroring `DiagramCanvas.hit_regions` above. `star_link_rows` is
+    `None` (so a click here is a no-op) whenever an agent is selected or
+    the celebration animation is already playing -- there's nothing to
+    click back into in either case.
+    """
+
+    class StarLinkClicked(Message):
+        pass
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.star_link_rows: tuple[int, int] | None = None
+
+    def on_click(self, event: events.Click) -> None:
+        if self.star_link_rows is None:
+            return
+        start, end = self.star_link_rows
+        if start <= event.y <= end:
+            event.stop()
+            self.post_message(self.StarLinkClicked())
 
 
 class LiveApp(App):
