@@ -1,4 +1,4 @@
-"""Live diagram + rolling message feed for uagents-trace.
+"""Live diagram + rolling message feed for trace-uagents.
 
 Opened after the setup wizard. Polls SQLite and shows agent-to-agent
 messages as they happen — one active trace at a time, bounded feed.
@@ -340,15 +340,13 @@ def build_hub_tree_diagram(
     return diagram
 
 
-def _view_label(view_mode: ViewMode) -> str:
-    return "tree view" if view_mode == "tree" else "diagram view"
-
-
 def _sub_title_for(setup: WatchSetup, view_mode: ViewMode, *, follow: bool) -> str:
-    """Status line only -- keybindings live in the Footer, not repeated here."""
-    names = ", ".join(setup.names.values()) if setup.names else "all agents"
-    follow_hint = "following latest" if follow else "pinned to one trace"
-    return f"{names}  ·  {_view_label(view_mode)}  ·  {follow_hint}"
+    """Status line -- a static usage hint (real keybindings a new user
+    wouldn't otherwise discover), not a restatement of current state. The
+    sidebar and diagram already show which trace is active and how; this
+    line doesn't need to repeat that.
+    """
+    return "f follow latest  ·  click a trace to pin  ·  v tree view"
 
 
 def _trace_matches_watch(trace: dict[str, Any], addresses: set[str] | None) -> bool:
@@ -673,7 +671,7 @@ _FETCH_LOGO_LINES = [line for line in _FETCH_BRAND_LINES[:-1] if line.strip()]
 # showing inspector detail instead of the empty-state logo.
 _BRAND_MARK_TEXT = Text(f"{_FETCH_LOGO_LINES[0][:11]}  {_BRAND_TITLE_LINE}", style=f"bold {ACCENT}")
 
-# Splash body: a co-branded lockup of the "uAgents Trace" figlet hero (bold)
+# Splash body: a co-branded lockup of the "Trace uAgents" figlet hero (bold)
 # and the full-resolution fetch.ai braille mark (normal weight) -- not the
 # downsampled `FETCH_BRAND_SMALL`, which drops dots and reads broken at any
 # size worth showing. Three degrade tiers, widest to narrowest:
@@ -1189,7 +1187,7 @@ class LiveApp(App):
         # one below it), so none of the calls after this need to change.
         await self.push_screen(SplashScreen())
 
-        self.title = "uagents-trace live"
+        self.title = "trace-uagents live"
         self.sub_title = _sub_title_for(self.setup, self.view_mode, follow=self._follow_latest)
         events_log = self.query_one("#events-panel", RichLog)
         events_log.write(Text("  Waiting for message flow…", style="#6b7280"))

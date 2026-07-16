@@ -369,7 +369,7 @@ class SplashAlwaysPresentTests(unittest.TestCase):
 
 class SplashBodyStructureTests(unittest.TestCase):
     """Regression coverage for the co-branded, side-by-side lockup: the
-    "uAgents Trace" figlet hero (bold) and the full-resolution fetch.ai
+    "Trace uAgents" figlet hero (bold) and the full-resolution fetch.ai
     braille mark (normal weight) on shared rows, divided by a thin vertical
     rule -- with a three-tier degrade (side-by-side -> stacked -> title-only)
     as the terminal narrows, and critically exactly one rendering of
@@ -604,7 +604,7 @@ class SplashBodyStructureTests(unittest.TestCase):
         # so the content is already final after mount.
         text = self._splash_content(SPLASH_MIN_WIDTH_STACKED - 1, force_full_reveal=False)
         self.assertEqual(text.plain, _BRAND_TITLE_LINE)
-        self.assertEqual(_BRAND_TITLE_LINE, "uAgents Trace")
+        self.assertEqual(_BRAND_TITLE_LINE, "Trace uAgents")
         self.assertNotIn("\n", text.plain)
 
     def test_each_degrade_tier_renders_at_its_own_width(self):
@@ -754,7 +754,7 @@ class SplashBodyStructureTests(unittest.TestCase):
 
     def test_fetch_mark_uses_full_resolution_brand_not_downsampled(self):
         # The mark must be the same full-resolution braille art as the
-        # standalone `FETCH_BRAND` panel (minus its own "uAgents Trace"
+        # standalone `FETCH_BRAND` panel (minus its own "Trace uAgents"
         # caption row, which doesn't belong here now that the hero carries
         # that text) -- not a downsampled copy, which drops dots and reads
         # broken at any size worth showing.
