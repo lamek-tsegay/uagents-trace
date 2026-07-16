@@ -29,14 +29,11 @@ from .network_canvas import (
     ERROR,
     SUCCESS,
     WARN,
-    assemble_centered_diagram,
     block_width,
-    build_diagram_legend,
     build_hub_hit_regions,
     build_hub_topology,
     build_peer_hit_regions,
     build_peer_topology,
-    build_table_legend,
     center_in_width,
     format_ms,
 )
@@ -178,143 +175,6 @@ def render_agent_box(label: str, width: int | None = None) -> list[str]:
     ]
 
 
-def build_hub_leg_table(legs: list[dict[str, Any]], agent_names: list[str]) -> Text:
-    """Fixed-column summary of per-agent latencies and status.
-
-    A failed leg's `dispatch_ms` is time-to-failure (how long uAgents took
-    to give up trying to deliver), not an outbound ack latency -- showing
-    it under "Out" reads as "the send was slow" when the send never
-    actually landed. Failed legs show "—" for Out/In/Total instead, with
-    the failure duration folded into the Status cell next to the ✗.
-    """
-    col_agent, col_out, col_in, col_total, col_status = 12, 8, 8, 8, 17
-    header = (
-        f"{'Agent':<{col_agent}}"
-        f"{'Out':>{col_out}}"
-        f"{'In':>{col_in}}"
-        f"{'Total':>{col_total}}"
-        f"{'Status':>{col_status}}"
-    )
-    table = Text(header + "\n", style=MUTED)
-    for leg, name in zip(legs, agent_names):
-        state = leg.get("state", "pending")
-        if state == "failed":
-            out_ms = "—"
-            in_ms = "—"
-            total_ms = "—"
-            status = f"✗ failed {format_ms(leg.get('dispatch_ms'))}"
-            row_style = f"bold {ERROR}"
-        elif state == "completed":
-            out_ms = format_ms(leg.get("dispatch_ms"))
-            in_ms = format_ms(leg.get("reply_ms"))
-            total_ms = format_ms(leg.get("latency_ms"))
-            status = "✓ done"
-            row_style = SUCCESS
-        else:
-            out_ms = format_ms(leg.get("dispatch_ms"))
-            in_ms = "…"
-            total_ms = "…"
-            status = "⋯ waiting"
-            row_style = WARN
-        row = (
-            f"{name:<{col_agent}}"
-            f"{out_ms:>{col_out}}"
-            f"{in_ms:>{col_in}}"
-            f"{total_ms:>{col_total}}"
-            f"{status:>{col_status}}"
-        )
-        table.append(row + "\n", style=row_style)
-    return table
-
-
-def build_peer_leg_table(
-    left_name: str,
-    right_name: str,
-    *,
-    message_ms: int | None,
-    reply_ms: int | None,
-    state: str,
-) -> Text:
-    """Two-row table for peer round-trip."""
-    col_route, col_dir, col_ms, col_status = 20, 6, 8, 10
-    header = (
-        f"{'Route':<{col_route}}"
-        f"{'Dir':>{col_dir}}"
-        f"{'Time':>{col_ms}}"
-        f"{'Status':>{col_status}}"
-    )
-    table = Text(header + "\n", style=MUTED)
-    route_out = f"{left_name} → {right_name}"
-    route_in = f"{right_name} → {left_name}"
-
-    out_status = "✓ done" if state != "failed" else "✗ failed"
-    out_style = f"bold {ERROR}" if state == "failed" else (WARN if state == "pending" else SUCCESS)
-    row_out = (
-        f"{route_out:<{col_route}}"
-        f"{'out':>{col_dir}}"
-        f"{format_ms(message_ms):>{col_ms}}"
-        f"{out_status:>{col_status}}"
-    )
-    table.append(row_out + "\n", style=out_style)
-
-    if reply_ms is not None:
-        row_in = (
-            f"{route_in:<{col_route}}"
-            f"{'in':>{col_dir}}"
-            f"{format_ms(reply_ms):>{col_ms}}"
-            f"{'✓ done':>{col_status}}"
-        )
-        table.append(row_in + "\n", style=SUCCESS)
-    elif state == "pending":
-        row_in = (
-            f"{route_in:<{col_route}}"
-            f"{'in':>{col_dir}}"
-            f"{'…':>{col_ms}}"
-            f"{'⋯ waiting':>{col_status}}"
-        )
-        table.append(row_in + "\n", style=WARN)
-
-    return table
-
-
-def build_hub_detail_summary(
-    hub_name: str,
-    legs: list[dict[str, Any]],
-    agent_names: list[str],
-    trace_id: str,
-) -> str:
-    n = len(legs)
-    complete = sum(1 for leg in legs if leg.get("state") == "completed")
-    failed = sum(1 for leg in legs if leg.get("state") == "failed")
-    names = ", ".join(agent_names)
-    latencies = [leg["latency_ms"] for leg in legs if leg.get("latency_ms") is not None]
-    parts = [f"{hub_name} dispatched to {names} · {complete}/{n} complete"]
-    if failed:
-        parts.append(f"{failed} failed")
-    if latencies:
-        parts.append(f"round-trip {format_ms(max(latencies))} max")
-    parts.append(f"trace {trace_id[:8]}")
-    return "  ·  ".join(parts)
-
-
-def build_hub_network_diagram(
-    state: TraceState,
-    alias_map: dict[str, str],
-    *,
-    pulse: bool = False,
-) -> Text:
-    """Hub topology + leg summary table, driven entirely by `state.legs`."""
-    legs = state.legs
-    orch_name = display_name(state.hub, alias_map)
-    agent_names = [display_name(leg["subagent"], alias_map) for leg in legs]
-    topology = build_hub_topology(legs, orch_name, agent_names, pulse=pulse)
-    if not legs:
-        return topology
-    table = build_hub_leg_table(legs, agent_names)
-    legend = build_diagram_legend()
-    return assemble_centered_diagram(topology, table, legend, table_legend=build_table_legend())
-
-
 def _latest_peer_round_trip(hops: list[Hop]) -> tuple[Hop | None, Hop | None]:
     """Most recent Message hop and matching Reply hop (if any)."""
     if not hops:
@@ -355,32 +215,7 @@ def build_peer_network_diagram(
     state = outbound.state
     leg_state = "completed" if state == "delivered" and reply else ("failed" if state in ("dropped", "timeout") else "pending")
 
-    diagram = build_peer_topology(left, right, state=leg_state, pulse=pulse)
-    table = build_peer_leg_table(
-        left,
-        right,
-        message_ms=outbound.latency_ms,
-        reply_ms=reply.latency_ms if reply else None,
-        state=leg_state,
-    )
-    legend = build_diagram_legend()
-    return assemble_centered_diagram(diagram, table, legend, table_legend=build_table_legend())
-
-
-def _assemble_table_block(table: Text, legend: Text, table_legend: Text) -> Text:
-    """Table + its legend lines as one block, un-centered -- the piece that
-    renders in the leg/route-table widget, directly beneath (and centered
-    independently from) the topology widget above it.
-    """
-    block = Text()
-    block.append_text(table)
-    block.append_text(table_legend)
-    block.append("\n")
-    block.append_text(legend)
-    return block
-
-
-DiagramPieces = tuple[Text, "Text | None", dict[str, tuple[int, int, int, int]]]
+DiagramPieces = tuple[Text, dict[str, tuple[int, int, int, int]]]
 
 
 def _hub_diagram_pieces(
@@ -390,11 +225,10 @@ def _hub_diagram_pieces(
     pulse: bool = False,
     selected: str | None = None,
 ) -> DiagramPieces:
-    """(topology, table_block, hit_regions) for a hub trace, split for the
-    live TUI's two-widget layout -- table_block is None when there are no
-    legs yet. `hit_regions` maps each subagent's *address* to its clickable
-    box region; `selected`, if given, is the currently-selected agent's
-    address, highlighted with a double border in the topology.
+    """(topology, hit_regions) for a hub trace. `hit_regions` maps each
+    subagent's *address* to its clickable box region; `selected`, if given,
+    is the currently-selected agent's address, highlighted with a double
+    border in the topology.
     """
     legs = state.legs
     orch_name = display_name(state.hub, alias_map)
@@ -402,12 +236,10 @@ def _hub_diagram_pieces(
     selected_name = display_name(selected, alias_map) if selected else None
     topology = build_hub_topology(legs, orch_name, agent_names, pulse=pulse, selected=selected_name)
     if not legs:
-        return topology, None, {}
-    table = build_hub_leg_table(legs, agent_names)
-    table_block = _assemble_table_block(table, build_diagram_legend(), build_table_legend())
+        return topology, {}
     regions = build_hub_hit_regions(legs, orch_name, agent_names)
     hit_regions = {leg["subagent"]: region for leg, region in zip(legs, regions)}
-    return topology, table_block, hit_regions
+    return topology, hit_regions
 
 
 def _peer_diagram_pieces(
@@ -417,9 +249,7 @@ def _peer_diagram_pieces(
     pulse: bool = False,
     selected: str | None = None,
 ) -> DiagramPieces:
-    """(topology, table_block, hit_regions) for a peer trace -- mirrors
-    `_hub_diagram_pieces`.
-    """
+    """(topology, hit_regions) for a peer trace -- mirrors `_hub_diagram_pieces`."""
     if not hops:
         return (
             Text(
@@ -428,13 +258,12 @@ def _peer_diagram_pieces(
                 "  in another terminal.",
                 style="dim",
             ),
-            None,
             {},
         )
 
     outbound, reply = _latest_peer_round_trip(hops)
     if outbound is None:
-        return Text("  Waiting for messages…", style="dim"), None, {}
+        return Text("  Waiting for messages…", style="dim"), {}
 
     left = display_name(outbound.source, alias_map)
     right = display_name(outbound.dest, alias_map)
@@ -446,17 +275,9 @@ def _peer_diagram_pieces(
     selected_name = display_name(selected, alias_map) if selected else None
 
     topology = build_peer_topology(left, right, state=leg_state, pulse=pulse, selected=selected_name)
-    table = build_peer_leg_table(
-        left,
-        right,
-        message_ms=outbound.latency_ms,
-        reply_ms=reply.latency_ms if reply else None,
-        state=leg_state,
-    )
-    table_block = _assemble_table_block(table, build_diagram_legend(), build_table_legend())
     left_box, right_box = build_peer_hit_regions(left, right)
     hit_regions = {outbound.source: left_box, outbound.dest: right_box}
-    return topology, table_block, hit_regions
+    return topology, hit_regions
 
 
 def _node_status_label(node: TreeNode) -> str:
@@ -784,30 +605,6 @@ def build_agent_inspector_text(
     else:
         text.append("No detail for this agent in the current trace.", style="dim")
     return text
-
-
-def build_trace_summary_line(
-    trace_id: str,
-    state: TraceState,
-    alias_map: dict[str, str],
-) -> Text:
-    """One-line trace-level rollup for the center column, under the
-    diagram/table -- moved out of the inspector, which is per-agent detail
-    only now (see `build_agent_inspector_text`).
-    """
-    if state.total == 0:
-        return Text(f"trace {trace_id[:8]}  ·  waiting for messages…", style="dim")
-
-    if state.shape == HUB and state.hub:
-        orch_name = display_name(state.hub, alias_map)
-        agent_names = [display_name(leg["subagent"], alias_map) for leg in state.legs]
-        summary = build_hub_detail_summary(orch_name, state.legs, agent_names, trace_id)
-    else:
-        summary = (
-            f"{state.completed} delivered  ·  {state.pending} pending  ·  {state.failed} failed  ·  "
-            f"trace {trace_id[:8]}"
-        )
-    return Text(f"{summary}  ·  click an agent above for detail", style=MUTED)
 
 
 SPLASH_ROW_STAGGER_SECONDS = 0.04

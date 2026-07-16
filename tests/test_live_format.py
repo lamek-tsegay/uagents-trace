@@ -11,18 +11,13 @@ from uagents_trace.live import (
     LATENCY_BAR_WIDTH,
     MUTED,
     _latency_bar,
-    _sidebar_markup,
-    build_hub_detail_summary,
-    build_hub_leg_table,
-    build_hub_network_diagram,
     build_hub_tree_diagram,
-    build_peer_network_diagram,
     format_event_line,
     message_label,
     render_agent_box,
     sidebar_label,
 )
-from uagents_trace.network_canvas import ERROR, SUCCESS, WARN, format_ms
+from uagents_trace.network_canvas import ERROR, SUCCESS, WARN, build_hub_topology, build_peer_topology, format_ms
 from uagents_trace.recorder import payload_summary
 from uagents_trace.shape import build_hops, build_interaction_tree, build_trace_state
 
@@ -125,119 +120,30 @@ class LiveFormatTests(unittest.TestCase):
         self.assertEqual(len(hops), 1)
         self.assertEqual(hops[0].latency_ms, 75)  # full hop: send enqueue -> receive ack
 
-    def test_peer_network_diagram(self):
-        spans = [
-            span("a", "b", payload_type="Hello", payload_summary="Hi Bob!", enqueued_at=0, acked_at=50),
-            span("b", "a", payload_type="Reply", payload_summary="Hi Alice!", enqueued_at=60, acked_at=80),
-        ]
-        hops = build_hops(spans)
-        diagram = build_peer_network_diagram(hops, {"a": "Alice", "b": "Bob"})
+    def test_peer_topology_shows_both_agents(self):
+        # The diagram panel is topology-only now (no leg/route table beside
+        # it) -- this exercises build_peer_topology directly, since it's
+        # what the live view actually renders (build_peer_network_diagram,
+        # which used to wrap it with a table, is gone).
+        diagram = build_peer_topology("Alice", "Bob", state="completed")
         text = diagram.plain
         self.assertIn("Alice", text)
         self.assertIn("Bob", text)
         self.assertIn("┌", text)
-        self.assertIn("Route", text)
-        self.assertIn("out", text)
-        self.assertIn("in", text)
-        self.assertIn("50ms", text)
-        self.assertNotIn("Request (", text)
+        self.assertIn("▶", text)
 
-    def test_hub_network_diagram_fanout(self):
-        spans = [
-            span("orch", "sub1", payload_type="Hello", payload_summary="Hi Bob!", enqueued_at=0, acked_at=3),
-            span("sub1", "orch", payload_type="Reply", payload_summary="done", enqueued_at=10, acked_at=20),
-            span("orch", "sub2", payload_type="Hello", payload_summary="Hi John!", enqueued_at=0, acked_at=4),
-            span("sub2", "orch", payload_type="Reply", payload_summary="done", enqueued_at=12, acked_at=22),
+    def test_hub_topology_shows_orchestrator_and_subagents(self):
+        legs = [
+            {"subagent": "sub1", "state": "completed"},
+            {"subagent": "sub2", "state": "completed"},
         ]
-        aliases = {"orch": "Orchestrator", "sub1": "SubAgent1", "sub2": "SubAgent2"}
-        state = build_trace_state(spans, hub_hint="orch")
-        diagram = build_hub_network_diagram(state, aliases)
+        diagram = build_hub_topology(legs, "Orchestrator", ["SubAgent1", "SubAgent2"])
         text = diagram.plain
         self.assertIn("Orchestrator", text)
         self.assertIn("SubAgent1", text)
         self.assertIn("SubAgent2", text)
         self.assertIn("┌", text)
         self.assertIn("orchestrator", text)
-        self.assertIn("Agent", text)
-        self.assertIn("Out", text)
-        self.assertIn("In", text)
-        self.assertIn("Total", text)
-        self.assertIn("3ms", text)
-        self.assertNotIn("Request (", text)
-
-    def test_hub_network_diagram_failed_leg_hides_misleading_out(self):
-        # A failed leg's dispatch_ms is time-to-failure, not outbound
-        # latency -- it must not appear under Out, and the failure
-        # duration should be visible next to the status instead.
-        spans = [
-            span("orch", "sub1", payload_type="Hello", enqueued_at=0, acked_at=3),
-            span("sub1", "orch", payload_type="Reply", enqueued_at=10, acked_at=20),
-            span(
-                "orch",
-                "sub2",
-                payload_type="Hello",
-                state="dropped",
-                error="Unable to resolve destination endpoint",
-                enqueued_at=0,
-                acked_at=698,
-            ),
-        ]
-        aliases = {"orch": "Orchestrator", "sub1": "SubAgent1", "sub2": "SubAgent2"}
-        state = build_trace_state(spans, hub_hint="orch")
-        diagram = build_hub_network_diagram(state, aliases)
-        text = diagram.plain
-        self.assertIn("698ms", text)  # failure duration surfaces near the status...
-        table_and_after = text.split("Agent", 1)[1]
-        # ...but never under the Out column: SubAgent2's row shows "—", not 698ms.
-        sub2_row_start = table_and_after.index("SubAgent2")
-        sub2_row = table_and_after[sub2_row_start : sub2_row_start + 60]
-        self.assertNotIn("698ms", sub2_row.split("✗")[0])
-
-    def test_hub_leg_table_columns(self):
-        legs = [
-            {
-                "subagent": "sub1",
-                "dispatch_ms": 30,
-                "reply_ms": 15,
-                "latency_ms": 45,
-                "state": "completed",
-            },
-            {
-                "subagent": "sub2",
-                "dispatch_ms": 25,
-                "state": "pending",
-            },
-        ]
-        table = build_hub_leg_table(legs, ["Bob", "John"])
-        text = table.plain
-        self.assertIn("Bob", text)
-        self.assertIn("John", text)
-        self.assertIn("30ms", text)
-        self.assertIn("15ms", text)
-        self.assertIn("45ms", text)
-        self.assertIn("⋯ waiting", text)
-
-    def test_hub_leg_table_failed_leg_omits_out_shows_failure_time(self):
-        legs = [
-            {"subagent": "sub4", "dispatch_ms": 723, "state": "failed", "reason": "Unable to resolve destination endpoint"},
-        ]
-        table = build_hub_leg_table(legs, ["SubAgent4"])
-        text = table.plain
-        self.assertIn("✗ failed 723ms", text)
-        # The Out column itself must read as unknown/failed, not "723ms".
-        row_line = next(line for line in text.splitlines() if "SubAgent4" in line)
-        out_field = row_line[len("SubAgent4"):].strip().split()[0]
-        self.assertEqual(out_field, "—")
-
-    def test_hub_detail_summary(self):
-        legs = [
-            {"subagent": "sub1", "state": "completed", "latency_ms": 45},
-            {"subagent": "sub2", "state": "pending"},
-        ]
-        summary = build_hub_detail_summary("Alice", legs, ["Bob", "John"], "abc12345-dead")
-        self.assertIn("Alice dispatched to Bob, John", summary)
-        self.assertIn("1/2 complete", summary)
-        self.assertIn("45ms max", summary)
 
     def test_hub_tree_diagram_fan_out(self):
         spans = [
@@ -431,21 +337,29 @@ class ColorEconomyTests(unittest.TestCase):
         warn_markup = _sidebar_markup("cafeba · ⚠ Orchestrator→4 · 3/4 ✓ · 1.12s", WARN)
         self.assertNotIn("bold", warn_markup)
 
-    def test_hub_leg_table_bolds_only_the_failed_row(self):
+    def test_hub_topology_bolds_only_the_failed_agent_box(self):
+        # The leg table this used to check is gone -- the same bold-only-
+        # for-failure invariant now lives in the topology's own box styling
+        # (network_canvas._box_style), so this exercises that directly.
+        # Styles are looked up by overlapping index range, not by searching
+        # for the label inside a single span's text: Canvas.to_text() can
+        # split one same-styled run across several adjacent spans, so a
+        # 4-char label like "Sub1" isn't guaranteed to sit wholly inside
+        # any one span.
         legs = [
-            {"subagent": "sub1", "dispatch_ms": 3, "reply_ms": 10, "latency_ms": 20, "state": "completed"},
-            {"subagent": "sub2", "dispatch_ms": 698, "state": "failed", "reason": "boom"},
+            {"subagent": "sub1", "state": "completed"},
+            {"subagent": "sub2", "state": "failed"},
         ]
-        table = build_hub_leg_table(legs, ["Sub1", "Sub2"])
-        styles_by_row = {}
-        for run in table.spans:
-            segment = table.plain[run.start : run.end]
-            if "Sub1" in segment:
-                styles_by_row["Sub1"] = run.style
-            if "Sub2" in segment:
-                styles_by_row["Sub2"] = run.style
-        self.assertNotIn("bold", styles_by_row["Sub1"])
-        self.assertIn(f"bold {ERROR}", styles_by_row["Sub2"])
+        diagram = build_hub_topology(legs, "Orchestrator", ["Sub1", "Sub2"])
+        plain = diagram.plain
+
+        def styles_at(label: str) -> list[str]:
+            start = plain.index(label)
+            end = start + len(label)
+            return [run.style for run in diagram.spans if run.start < end and run.end > start]
+
+        self.assertTrue(all("bold" not in (style or "") for style in styles_at("Sub1")))
+        self.assertIn(f"bold {ERROR}", styles_at("Sub2"))
 
     def test_success_is_visibly_dimmer_than_error_and_accent(self):
         # Regression guard for the color-economy fix itself: SUCCESS must
