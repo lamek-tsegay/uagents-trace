@@ -1425,6 +1425,117 @@ def _star_link_text(*, celebration_frame: int | None = None) -> Text:
 CELEBRATION_TICKS = 10
 
 
+def _build_empty_state_text(
+    stats: SessionStats,
+    *,
+    tick: int,
+    available_height: int,
+    celebration_frame: int | None,
+) -> tuple[Text, tuple[int, int] | None]:
+    """The inspector's empty-state content: animated logo, hint, star link,
+    then as many of the Session/Timing/Failures stat blocks as fit in
+    `available_height` (rows) -- dropped from the bottom, in that order,
+    when they don't all fit (logo and star link are never dropped).
+
+    Deliberate, consistent vertical rhythm rather than stacked text: one
+    blank line between the logo/hint/star-link group's own pieces and
+    between each stat block, and *two* blank lines (a clearly bigger gap)
+    where the "action" area (hint + star link) hands off to the "stats"
+    area -- everything above that gap is about what to *do*, everything
+    below it is read-only data, and the gap is what tells you that's
+    happening. Each block costs `header_gap + len(content_lines)` rows (a
+    blank separator, the header itself, then its own content lines, all at
+    a consistent header+indented-content shape); a block is included only
+    if adding it wouldn't push the total past `available_height`.
+
+    `celebration_frame`, if not `None`, is passed straight through to
+    `_star_link_text` -- it overlays a brief flash on just that line, so
+    it doesn't change this function's row accounting at all (the
+    celebration was rebuilt specifically so it *wouldn't* need to -- see
+    that function's own docstring for why). Returns `star_link_rows` as
+    `None` while celebrating, since there's nothing to click back into
+    mid-flash.
+
+    Returns `(text, star_link_rows)`, where `star_link_rows` is the
+    `(start, end)` 0-indexed, inclusive line range the star link landed on
+    -- for `InspectorCanvas` to hit-test clicks against.
+    """
+    text = Text(justify="center")
+    text.append_text(_shimmer_logo_text(tick))
+    text.append("\n\n")
+    text.append(INSPECTOR_EMPTY_HINT, style="dim")
+    text.append("\n\n")
+
+    star_start_row = text.plain.count("\n")
+    text.append_text(_star_link_text(celebration_frame=celebration_frame))
+    star_end_row = text.plain.count("\n")
+    star_link_rows = None if celebration_frame is not None else (star_start_row, star_end_row)
+
+    _append_session_stat_blocks(text, stats, available_height)
+
+    return text, star_link_rows
+
+
+def _append_session_stat_blocks(
+    text: Text, stats: SessionStats, available_height: int, *, first_block_gap: int = 3
+) -> None:
+    """Appends as many of the Session/Timing/Failures blocks (in that
+    order) as fit within `available_height` rows total -- including
+    whatever `text` already contains -- dropped from the bottom (Failures
+    first) when they don't all fit. Each block costs `header_gap +
+    len(content_lines)` rows (a blank separator, the header itself, then
+    its own indented content lines).
+
+    Shared by the empty state (`_build_empty_state_text`, which wants
+    `first_block_gap`'s default of 3 newlines / 2 blank lines -- a clearly
+    bigger gap marking the action-area-to-stats-area handoff) and the
+    selected-agent footer (`_append_session_footer`, which passes
+    `first_block_gap=2` since its own divider rule already marks that
+    handoff and a second, bigger gap on top of it would be redundant) --
+    so the two render identically otherwise: same computation, same
+    styling, not two copies that could drift apart. See the module's own
+    coherence note.
+    """
+    first_block = True
+    for header, content_lines in (
+        ("Session", _session_block_lines(stats)),
+        ("Timing", _timing_block_lines(stats)),
+        ("Failures", _failures_block_lines(stats)),
+    ):
+        header_gap = first_block_gap if first_block else 2
+        cost = header_gap + len(content_lines)
+        projected_rows = text.plain.count("\n") + cost + 1
+        if projected_rows > available_height:
+            break
+        text.append("\n" * header_gap)
+        text.append(header, style=f"bold {GREEN}")
+        for line in content_lines:
+            text.append("\n  " + line, style=MUTED)
+        first_block = False
+
+
+def _append_session_footer(text: Text, stats: SessionStats, available_height: int) -> None:
+    """Divider + the same Session/Timing/Failures blocks the empty state
+    shows (see `_append_session_stat_blocks`), appended to `text` only if
+    at least the divider and the first block (Session) actually fit -- a
+    lone divider with nothing below it would read as a rendering glitch,
+    not a deliberate "there's more" signal, so the whole footer is
+    skipped rather than partially shown down to just a rule line. This is
+    the lowest layout priority in the selected-agent view: the per-agent
+    detail above it always wins when space is short (see
+    `build_agent_inspector_text`).
+    """
+    used_rows = text.plain.count("\n")
+    footer = Text()
+    footer.append("\n")
+    footer.append("─" * INSPECTOR_CONTENT_WIDTH, style=MUTED)
+    rows_before_blocks = footer.plain.count("\n")
+    _append_session_stat_blocks(footer, stats, available_height - used_rows, first_block_gap=2)
+    if footer.plain.count("\n") == rows_before_blocks:
+        return
+    text.append_text(footer)
+
+
 class DiagramCanvas(Static):
     """The diagram widget -- hit-tests clicks against the agent box regions
     computed alongside the last render (see `LiveApp._refresh_display`) and
