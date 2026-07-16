@@ -7,14 +7,29 @@ from typing import Any
 
 from rich.text import Text
 
+# Canonical "green" for the live TUI -- the same vivid value `live.py` uses
+# for the splash hero (imported there as `SPLASH_HERO_GREEN` so the splash's
+# own naming stays intact). Diagram box defaults (the hub/placeholder boxes
+# below, which aren't any one leg's state) and the connector-line fallback
+# read this directly, and so does `SUCCESS` below -- there is exactly one
+# green in the live TUI. `ACCENT` is kept, unchanged, only for the handful
+# of spots that still want the calmer shade -- wizard.py's CLI prompts and
+# the splash's own fetch.ai co-mark (see that call site's comment).
+GREEN = "#4ade80"
 ACCENT = "#34d399"
 MUTED = "#6b7280"
-# Dimmed on purpose: delivered/completed is the steady state, so it's the
-# color on screen the most. Keeping it saturated made everything read as
-# "one wall of green" with nothing to focus on. ERROR stays fully bright --
-# bright/bold is now reserved for failures and the selected trace, not for
-# the common case.
-SUCCESS = "#3f8f66"
+# `SUCCESS` used to be its own, deliberately dimmer green (#3f8f66) so that
+# delivered/completed -- the steady state, and so the color on screen the
+# most -- didn't read as "one wall of green" with nothing to focus on. That
+# traded a real amount of visual hierarchy for uniformity; repointed to
+# `GREEN` above by explicit choice (full one-green-everywhere over that
+# hierarchy) rather than because the tradeoff stopped existing. The
+# completed/failed/pending distinction this constant is part of still
+# reads fine without it -- ERROR (red) and WARN (amber) are their own hues,
+# not shades of green, and every state also carries its own glyph (✓/✗/⋯)
+# and text, so nothing here depended on dim-vs-vivid green as its only
+# signal.
+SUCCESS = GREEN
 ERROR = "#f87171"
 WARN = "#facc15"
 
@@ -120,7 +135,7 @@ class Canvas:
         """
         w = max(len(label) + 2, BOX_MIN_WIDTH)
         total_w = w + 2  # both border columns included
-        box_style = style or ACCENT
+        box_style = style or GREEN
         tl, tr, bl, br, h, v = ("╔", "╗", "╚", "╝", "═", "║") if double else ("┌", "┐", "└", "┘", "─", "│")
         self.text_over(x, y, tl + h * w + tr, box_style)
         self.text_over(x, y + 1, v + label.center(w) + v, box_style)
@@ -217,7 +232,7 @@ def _line_style(state: str, pulse: bool) -> str:
         return SUCCESS
     if state == "failed":
         return f"bold {ERROR}"
-    return STATE_STYLE.get(state, ACCENT)
+    return STATE_STYLE.get(state, GREEN)
 
 
 def _stem_style(legs: list[dict[str, Any]], pulse: bool) -> str:
