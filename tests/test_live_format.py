@@ -183,10 +183,14 @@ class SidebarLabelTests(unittest.TestCase):
             ),
         ]
         state = build_trace_state(spans, hub_hint="orch")
-        label, style = sidebar_label("1ffa482a-dead-beef", state, {"orch": "Orchestrator"})
-        self.assertIn("Orchestrator→4", label)
-        self.assertIn("3/4 ✓", label)
-        self.assertNotIn("FAILURE", label)
+        text, style = sidebar_label("1ffa482a-dead-beef", state, {"orch": "Orchestrator"})
+        plain = text.plain
+        # Two lines now: identity (id + header) on line 1, status
+        # (fraction/bar/duration) indented on line 2.
+        self.assertEqual(plain.count("\n"), 1)
+        self.assertIn("Orchestrator→4", plain)
+        self.assertIn("3/4 ✓", plain)
+        self.assertNotIn("FAILURE", plain)
         # 3/4 succeeded -- this must NOT read as a total failure (red).
         self.assertEqual(style, WARN)
 
@@ -196,9 +200,10 @@ class SidebarLabelTests(unittest.TestCase):
             span("b", "a", payload_type="Reply", enqueued_at=10, acked_at=20),
         ]
         state = build_trace_state(spans)
-        label, style = sidebar_label("abc12345", state, {"a": "Alice", "b": "Bob"})
-        self.assertIn("Alice↔Bob", label)
-        self.assertIn("2/2 ✓", label)
+        text, style = sidebar_label("abc12345", state, {"a": "Alice", "b": "Bob"})
+        plain = text.plain
+        self.assertIn("Alice↔Bob", plain)
+        self.assertIn("2/2 ✓", plain)
         self.assertEqual(style, SUCCESS)
 
     def test_fully_failed_hub_trace_is_red(self):
@@ -211,7 +216,7 @@ class SidebarLabelTests(unittest.TestCase):
             for i in range(1, 5)
         ]
         state = build_trace_state(spans, hub_hint="orch")
-        label, style = sidebar_label("deadbeef", state, {"orch": "Orchestrator"})
+        _text, style = sidebar_label("deadbeef", state, {"orch": "Orchestrator"})
         self.assertEqual(style, ERROR)
 
     def test_pending_trace_is_amber_not_red(self):
@@ -219,16 +224,38 @@ class SidebarLabelTests(unittest.TestCase):
         # amber ("in progress"), not red and not green.
         spans = [span("orch", "sub1", payload_type="Task", state="pending", enqueued_at=0, acked_at=None)]
         state = build_trace_state(spans, hub_hint="orch")
-        label, style = sidebar_label("deadbeef", state, {"orch": "Orchestrator"})
+        _text, style = sidebar_label("deadbeef", state, {"orch": "Orchestrator"})
         self.assertEqual(style, WARN)
 
-    def test_sidebar_markup_dims_trace_id_separately_from_status(self):
-        markup = _sidebar_markup("1ffa48 · Orchestrator→4 · 3/4 ✓ · 1.12s", WARN)
-        # The id segment is always neutral/dim...
-        self.assertIn(f"[{MUTED}]1ffa48[/]", markup)
-        # ...while the status-bearing remainder carries the semantic color,
-        # not a single flat style applied to the whole line.
-        self.assertIn(f"[{WARN}]Orchestrator→4 · 3/4 ✓ · 1.12s[/]", markup)
+    def test_sidebar_label_dims_trace_id_separately_from_status(self):
+        spans = [
+            span("orch", "sub1", payload_type="Task", enqueued_at=0, acked_at=10),
+            span("sub1", "orch", payload_type="Result", enqueued_at=10, acked_at=20),
+            span("orch", "sub2", payload_type="Task", enqueued_at=0, acked_at=10),
+            span("sub2", "orch", payload_type="Result", enqueued_at=10, acked_at=20),
+            span("orch", "sub3", payload_type="Task", enqueued_at=0, acked_at=10),
+            span("sub3", "orch", payload_type="Result", enqueued_at=10, acked_at=20),
+            span(
+                "orch", "sub4", payload_type="Task", state="dropped",
+                error="Unable to resolve destination endpoint", enqueued_at=0, acked_at=700,
+            ),
+        ]
+        state = build_trace_state(spans, hub_hint="orch")
+        text, style = sidebar_label("1ffa482a-dead-beef", state, {"orch": "Orchestrator"})
+        plain = text.plain
+
+        def style_at(index: int) -> str:
+            return next(run.style for run in text.spans if run.start <= index < run.end)
+
+        # The id segment (line 1, column 0) is always neutral/dim...
+        self.assertEqual(style_at(0), MUTED)
+        # ...while the header (line 1) and all of line 2 carry the
+        # semantic color, not a single flat style applied to the whole
+        # block.
+        header_idx = plain.index("Orchestrator")
+        status_idx = plain.index("3/4")
+        self.assertEqual(style_at(header_idx), style)
+        self.assertEqual(style_at(status_idx), style)
 
 
 class SidebarMarkerMappingTests(unittest.TestCase):
@@ -255,35 +282,51 @@ class SidebarMarkerMappingTests(unittest.TestCase):
 
     def test_fully_failed_gets_failure_marker_not_degraded(self):
         state = self._hub_state(completed=0, failed=3, pending=0)
-        label, style = sidebar_label("deadbeef", state, {"orch": "Orchestrator"})
+        text, style = sidebar_label("deadbeef", state, {"orch": "Orchestrator"})
+        plain = text.plain
         self.assertEqual(style, ERROR)
-        self.assertIn(FAILURE_MARKER, label)
-        self.assertNotIn(DEGRADED_MARKER, label)
+        self.assertIn(FAILURE_MARKER.strip(), plain)
+        self.assertNotIn(DEGRADED_MARKER.strip(), plain)
 
     def test_partial_failure_gets_degraded_marker_not_failure(self):
         # Some legs ok, one failed -- WARN (not red), but must still be
         # visually distinct from a trace that's merely still in progress.
         state = self._hub_state(completed=3, failed=1, pending=0)
-        label, style = sidebar_label("deadbeef", state, {"orch": "Orchestrator"})
+        text, style = sidebar_label("deadbeef", state, {"orch": "Orchestrator"})
+        plain = text.plain
         self.assertEqual(style, WARN)
-        self.assertIn(DEGRADED_MARKER, label)
-        self.assertNotIn(FAILURE_MARKER, label)
+        self.assertIn(DEGRADED_MARKER.strip(), plain)
+        self.assertNotIn(FAILURE_MARKER.strip(), plain)
 
     def test_plain_pending_gets_no_marker(self):
         # Nothing has failed -- just still running. Must not carry either
         # failure marker, or it'd be indistinguishable from a degraded trace.
         state = self._hub_state(completed=1, failed=0, pending=1)
-        label, style = sidebar_label("deadbeef", state, {"orch": "Orchestrator"})
+        text, style = sidebar_label("deadbeef", state, {"orch": "Orchestrator"})
+        plain = text.plain
         self.assertEqual(style, WARN)
-        self.assertNotIn(DEGRADED_MARKER, label)
-        self.assertNotIn(FAILURE_MARKER, label)
+        self.assertNotIn(DEGRADED_MARKER.strip(), plain)
+        self.assertNotIn(FAILURE_MARKER.strip(), plain)
 
     def test_fully_delivered_gets_no_marker(self):
         state = self._hub_state(completed=2, failed=0, pending=0)
-        label, style = sidebar_label("deadbeef", state, {"orch": "Orchestrator"})
+        text, style = sidebar_label("deadbeef", state, {"orch": "Orchestrator"})
+        plain = text.plain
         self.assertEqual(style, SUCCESS)
-        self.assertNotIn(DEGRADED_MARKER, label)
-        self.assertNotIn(FAILURE_MARKER, label)
+        self.assertNotIn(DEGRADED_MARKER.strip(), plain)
+        self.assertNotIn(FAILURE_MARKER.strip(), plain)
+
+    def test_marker_column_is_reserved_even_when_absent(self):
+        # A marker (⚑/⚠) must not shift line 1's header sideways depending
+        # on whether it's present -- the header should land in the same
+        # column whether or not a trace carries a marker.
+        failed_state = self._hub_state(completed=0, failed=3, pending=0)
+        clean_state = self._hub_state(completed=2, failed=0, pending=0)
+        failed_text, _ = sidebar_label("deadbeef", failed_state, {"orch": "Orchestrator"})
+        clean_text, _ = sidebar_label("deadbeef", clean_state, {"orch": "Orchestrator"})
+        failed_header_col = failed_text.plain.split("\n")[0].index("Orchestrator")
+        clean_header_col = clean_text.plain.split("\n")[0].index("Orchestrator")
+        self.assertEqual(failed_header_col, clean_header_col)
 
 
 class LatencyBarTests(unittest.TestCase):
@@ -314,11 +357,12 @@ class LatencyBarTests(unittest.TestCase):
             span("b", "a", payload_type="Reply", enqueued_at=10, acked_at=1200),
         ]
         state = build_trace_state(spans)
-        label, _ = sidebar_label("abc12345", state, {"a": "Alice", "b": "Bob"})
+        text, _ = sidebar_label("abc12345", state, {"a": "Alice", "b": "Bob"})
         # The bar replaces the *bare* number -- but the exact duration text
         # must still be present right next to it, not lost.
-        self.assertIn(_latency_bar(state.duration_ms), label)
-        self.assertIn(format_ms(state.duration_ms), label)
+        plain = text.plain
+        self.assertIn(_latency_bar(state.duration_ms), plain)
+        self.assertIn(format_ms(state.duration_ms), plain)
 
 
 class ColorEconomyTests(unittest.TestCase):
@@ -327,15 +371,50 @@ class ColorEconomyTests(unittest.TestCase):
     though both are still colored (green vs red) for quick scanning.
     """
 
-    def test_sidebar_markup_bolds_only_the_failed_style(self):
-        failed_markup = _sidebar_markup("1ffa48 · ⚑ Orchestrator→4 · 0/4 ✓ · 700ms", ERROR)
-        self.assertIn(f"[bold {ERROR}]", failed_markup)
+    def test_sidebar_label_bolds_only_the_failed_style(self):
+        def status_style(text):
+            # First char of line 2 (the status line) -- its style is what
+            # this test cares about, whatever line 2's exact wording is.
+            status_idx = text.plain.index("\n") + 1
+            return next(run.style for run in text.spans if run.start <= status_idx < run.end)
 
-        success_markup = _sidebar_markup("abc123 · Alice↔Bob · 2/2 ✓ · 45ms", SUCCESS)
-        self.assertNotIn("bold", success_markup)
+        failed_spans = [
+            span(
+                "orch", f"sub{i}", payload_type="Task", state="dropped",
+                error="Unable to resolve destination endpoint", enqueued_at=0, acked_at=700,
+            )
+            for i in range(1, 5)
+        ]
+        failed_state = build_trace_state(failed_spans, hub_hint="orch")
+        failed_text, failed_style = sidebar_label("1ffa48", failed_state, {"orch": "Orchestrator"})
+        self.assertEqual(failed_style, ERROR)
+        self.assertIn("bold", status_style(failed_text))
 
-        warn_markup = _sidebar_markup("cafeba · ⚠ Orchestrator→4 · 3/4 ✓ · 1.12s", WARN)
-        self.assertNotIn("bold", warn_markup)
+        success_spans = [
+            span("a", "b", payload_type="Hello", enqueued_at=0, acked_at=10),
+            span("b", "a", payload_type="Reply", enqueued_at=10, acked_at=20),
+        ]
+        success_state = build_trace_state(success_spans)
+        success_text, success_style = sidebar_label("abc123", success_state, {"a": "Alice", "b": "Bob"})
+        self.assertEqual(success_style, SUCCESS)
+        self.assertNotIn("bold", status_style(success_text))
+
+        warn_spans = [
+            span("orch", "sub1", payload_type="Task", enqueued_at=0, acked_at=10),
+            span("sub1", "orch", payload_type="Result", enqueued_at=10, acked_at=20),
+            span("orch", "sub2", payload_type="Task", enqueued_at=0, acked_at=10),
+            span("sub2", "orch", payload_type="Result", enqueued_at=10, acked_at=20),
+            span("orch", "sub3", payload_type="Task", enqueued_at=0, acked_at=10),
+            span("sub3", "orch", payload_type="Result", enqueued_at=10, acked_at=20),
+            span(
+                "orch", "sub4", payload_type="Task", state="dropped",
+                error="Unable to resolve destination endpoint", enqueued_at=0, acked_at=700,
+            ),
+        ]
+        warn_state = build_trace_state(warn_spans, hub_hint="orch")
+        warn_text, warn_style = sidebar_label("cafeba", warn_state, {"orch": "Orchestrator"})
+        self.assertEqual(warn_style, WARN)
+        self.assertNotIn("bold", status_style(warn_text))
 
     def test_hub_topology_bolds_only_the_failed_agent_box(self):
         # The leg table this used to check is gone -- the same bold-only-

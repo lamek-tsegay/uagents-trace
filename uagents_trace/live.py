@@ -380,15 +380,23 @@ LATENCY_BAR_EMPTY = "▯"
 
 # Sidebar row markers -- a failed-everything trace and a partially-degraded
 # one both read WARN/ERROR via `style`, but only the marker glyph tells them
-# apart from a scan of the list without reading the fraction text.
+# apart from a scan of the list without reading the fraction text. Both are
+# the same width (glyph + space) -- MARKER_WIDTH pads the absent case to
+# match, so line 1's header lands in the same column whether or not a
+# marker is present (a plain "" here would jog the header 2 cols sideways
+# only on the rows that happen to carry one).
 FAILURE_MARKER = "⚑ "
 DEGRADED_MARKER = "⚠ "
+MARKER_WIDTH = 2
 
 
 def _latency_bar(duration_ms: int) -> str:
     """Small inline bar for a trace's duration, scanned at a glance instead
     of having to read the raw ms/s number -- the number stays alongside it
     (see `sidebar_label`) so the exact value is still there when it matters.
+    Its scale (LATENCY_BAR_SCALE_MS) isn't self-evident from the bar alone;
+    surfaced once via `#trace-list`'s border_title rather than repeated on
+    every row (see `LiveApp.compose`).
     """
     if duration_ms <= 0:
         return LATENCY_BAR_EMPTY * LATENCY_BAR_WIDTH
@@ -397,15 +405,22 @@ def _latency_bar(duration_ms: int) -> str:
     return LATENCY_BAR_FILLED * filled + LATENCY_BAR_EMPTY * (LATENCY_BAR_WIDTH - filled)
 
 
-def sidebar_label(trace_id: str, state: TraceState, alias_map: dict[str, str]) -> tuple[str, str]:
-    """(text, style) for one sidebar row -- a fractional rollup, not a
-    binary all-or-nothing ✓/✗, so a hub trace that's 3/4 done doesn't read
-    as a total failure just because one leg is still broken.
+def sidebar_label(trace_id: str, state: TraceState, alias_map: dict[str, str]) -> tuple[Text, str]:
+    """(text, style) for one two-line sidebar row -- a fractional rollup,
+    not a binary all-or-nothing ✓/✗, so a hub trace that's 3/4 done doesn't
+    read as a total failure just because one leg is still broken.
+
+        line 1 (identity, scanned to find a trace): "{id} · {marker}{header}"
+        line 2 (status, indented):                   "  {done}/{total} ✓  {bar} {duration}"
 
     Color is fractional too: red is reserved for a trace where *every*
     leg failed. A trace with some legs ok and some failed (or still
     pending) reads amber -- "needs a look", not "everything is broken".
-    Only a fully clean trace (nothing failed or pending) reads green.
+    Only a fully clean trace (nothing failed or pending) reads green. The
+    trace id on line 1 always stays neutral/dim regardless of outcome;
+    only the header and all of line 2 carry the semantic color, bold only
+    for a fully-failed trace (style == ERROR) -- everything else,
+    including a fully-delivered trace, recedes at normal weight.
 
     A trace with *any* failed leg always carries a marker (⚑ if every leg
     failed, ⚠ if only some did) so it stands out from a scan of the list
@@ -413,7 +428,8 @@ def sidebar_label(trace_id: str, state: TraceState, alias_map: dict[str, str]) -
     must never look like a plain in-progress one.
     """
     if state.total == 0:
-        return f"{trace_id[:6]} · waiting for spans…", MUTED
+        text = Text(f"{trace_id[:6]} · waiting for spans…", style=MUTED)
+        return text, MUTED
 
     if state.shape == HUB and state.hub:
         hub_name = display_name(state.hub, alias_map)
@@ -438,22 +454,15 @@ def sidebar_label(trace_id: str, state: TraceState, alias_map: dict[str, str]) -
         style = WARN
         marker = ""
 
-    label = f"{trace_id[:6]} · {marker}{header} · {state.completed}/{state.total} ✓ · {bar} {duration}"
-    return label, style
-
-
-def _sidebar_markup(label_text: str, style: str) -> str:
-    """Rich markup for one sidebar row: the trace id stays neutral/dim
-    regardless of outcome, and only the status-bearing remainder (header ·
-    fraction · duration) carries the semantic color. Bold is reserved for
-    a fully-failed trace (style == ERROR) -- everything else, including a
-    fully-delivered trace, recedes at normal weight.
-    """
-    id_part, sep, rest = label_text.partition(" · ")
-    if not sep:
-        return f"[{MUTED}]{label_text}[/]"
     text_style = f"bold {style}" if style == ERROR else style
-    return f"[{MUTED}]{id_part}[/] · [{text_style}]{rest}[/]"
+    marker_padded = marker.ljust(MARKER_WIDTH)
+
+    text = Text()
+    text.append(f"{trace_id[:6]}", style=MUTED)
+    text.append(" · ", style=MUTED)
+    text.append(f"{marker_padded}{header}\n", style=text_style)
+    text.append(f"  {state.completed}/{state.total} ✓  {bar} {duration}", style=text_style)
+    return text, style
 
 
 def _find_span(spans: list[dict[str, Any]], source: str, dest: str, direction: str = "send") -> dict[str, Any] | None:
