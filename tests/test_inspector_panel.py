@@ -12,7 +12,7 @@ import unittest
 from textual import events
 from textual.containers import HorizontalScroll, VerticalScroll
 
-from uagents_trace.live import DiagramCanvas, INSPECTOR_EMPTY_HINT, LiveApp
+from uagents_trace.live import DiagramCanvas, INSPECTOR_EMPTY_HINT, STAR_URL, InspectorCanvas, LiveApp
 from uagents_trace.store import init_db, insert_span, set_alias
 from uagents_trace.wizard import WatchSetup
 
@@ -30,6 +30,7 @@ def _hub_span(
     error=None,
     payload_summary=None,
     protocol="P1",
+    detail=None,
 ):
     return dict(
         id=span_id,
@@ -47,7 +48,7 @@ def _hub_span(
         error=error,
         session_id=trace_id,
         kind="send",
-        detail=None,
+        detail=detail,
         payload_summary=payload_summary,
         direction="send",
     )
@@ -257,8 +258,9 @@ class InspectorClickToRevealTests(unittest.TestCase):
                 await _boot(pilot)
 
                 plain = self._inspector_plain(app)
-                # The empty state is now the brand logo with the hint
-                # underneath, not the bare hint string on its own.
+                # The empty state is now the brand logo with the hint,
+                # session stats, and a star link underneath -- not just
+                # the bare hint string on its own.
                 self.assertIn(INSPECTOR_EMPTY_HINT, plain)
                 self.assertNotEqual(plain, INSPECTOR_EMPTY_HINT)
                 # No agent, hop, or leg detail (payloads, protocol, timing)
@@ -266,8 +268,27 @@ class InspectorClickToRevealTests(unittest.TestCase):
                 self.assertNotIn("protocol", plain)
                 self.assertNotIn("dispatch", plain)
 
+                # The star link and its literal URL (for terminals that
+                # don't render OSC 8) are both present as visible text.
+                self.assertIn("Star uAgents on GitHub", plain)
+                self.assertIn(STAR_URL, plain)
+
+                # At this size (240x45) all three stat blocks fit.
+                self.assertIn("Session", plain)
+                self.assertIn("Timing", plain)
+                self.assertIn("Failures", plain)
+
                 scroll = app.query_one("#inspector-scroll", VerticalScroll)
                 self.assertIn("inspector-empty", scroll.classes)
+
+                # The star link's hit region is armed in the empty state,
+                # so a click on it can reach InspectorCanvas.on_click.
+                widget = app.query_one("#inspector-content", InspectorCanvas)
+                self.assertIsNotNone(widget.star_link_rows)
+
+                # The shimmer's own fast timer is running while the empty
+                # state is showing -- it must not sit idle.
+                self.assertIsNotNone(app._shimmer_timer)
 
         asyncio.run(run())
 
@@ -278,7 +299,12 @@ class InspectorClickToRevealTests(unittest.TestCase):
             addrs, names = await _seed_hub_trace(self.db_path, n_subagents=4)
             setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
             app = LiveApp(setup)
-            async with app.run_test(size=(240, 45)) as pilot:
+            # Taller than most tests in this file -- tall enough for the
+            # per-agent detail *and* the full Session/Timing/Failures
+            # footer to all fit without any of the footer dropping (see
+            # test_short_terminal_selected_agent_keeps_detail_drops_footer
+            # for the drop-order case).
+            async with app.run_test(size=(240, 62)) as pilot:
                 await _boot(pilot)
                 await _click_agent(pilot, app, "sub2")
 
@@ -294,8 +320,31 @@ class InspectorClickToRevealTests(unittest.TestCase):
                 # The trace-level summary moved out of the inspector.
                 self.assertNotIn("dispatched to", plain)
 
+                # The full, untruncated address (the alias hides this
+                # everywhere else in the panel) -- "sub2" is the fake
+                # address these tests use, distinct from the "SubAgent2"
+                # alias text already asserted above.
+                self.assertIn("Address", plain)
+                self.assertIn("sub2", plain)
+
+                # The session-stats footer -- same blocks the empty state
+                # shows, filling what used to be dead space below a short
+                # detail block. "Timing" alone is ambiguous (the per-agent
+                # detail above already has its own Timing section) --
+                # check the divider and Session/Failures' own composed
+                # text, which only the footer ever produces.
+                self.assertIn("─" * 10, plain)
+                self.assertIn("traces ·", plain)
+                self.assertIn("Failures", plain)
+                self.assertEqual(plain.count("Timing"), 2)
+
                 scroll = app.query_one("#inspector-scroll", VerticalScroll)
                 self.assertNotIn("inspector-empty", scroll.classes)
+
+                # Leaving the empty state stops the shimmer timer -- it
+                # shouldn't keep ticking (and re-rendering the inspector
+                # several times a second) behind an agent's static detail.
+                self.assertIsNone(app._shimmer_timer)
 
         asyncio.run(run())
 
@@ -337,6 +386,93 @@ class InspectorClickToRevealTests(unittest.TestCase):
 
         asyncio.run(run())
 
+    def test_click_shows_protocol_detail_when_present(self):
+        import asyncio
+
+        async def run():
+            await init_db(self.db_path)
+            await insert_span(
+                self.db_path,
+                _hub_span(
+                    span_id="pay-1",
+                    trace_id="trace-pay",
+                    source="orch",
+                    dest="sub1",
+                    payload_type="RequestPayment",
+                    enqueued_at=0,
+                    acked_at=5,
+                    protocol="Payment Protocol",
+                    detail="5 FET",
+                ),
+            )
+            await set_alias(self.db_path, "Orchestrator", "orch")
+            await set_alias(self.db_path, "SubAgent1", "sub1")
+            setup = WatchSetup(
+                addresses={"orch", "sub1"},
+                names={"orch": "Orchestrator", "sub1": "SubAgent1"},
+                filter_only=False,
+                db_path=self.db_path,
+                orchestrator=None,
+            )
+            app = LiveApp(setup)
+            async with app.run_test(size=(240, 45)) as pilot:
+                await _boot(pilot)
+                await _click_agent(pilot, app, "orch")
+
+                plain = self._inspector_plain(app)
+                # detail used to be genuinely invisible for a hub leg, and
+                # only a silent fallback for a peer hop (dropped whenever
+                # payload_summary was also set) -- now shown explicitly.
+                self.assertIn("detail: 5 FET", plain)
+
+        asyncio.run(run())
+
+    def test_click_shows_wall_clock_send_time(self):
+        import asyncio
+        import re
+
+        async def run():
+            addrs, names = await _seed_hub_trace(self.db_path, n_subagents=2)
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            app = LiveApp(setup)
+            async with app.run_test(size=(240, 45)) as pilot:
+                await _boot(pilot)
+                await _click_agent(pilot, app, "sub1")
+
+                plain = self._inspector_plain(app)
+                # Local wall-clock, not just the trace-relative deltas
+                # already in the Timing table -- an anchor point for
+                # cross-referencing an agent's own stdout logs.
+                self.assertRegex(plain, r"sent at \d{2}:\d{2}:\d{2}\.\d{3}")
+
+        asyncio.run(run())
+
+    def test_short_terminal_selected_agent_keeps_detail_drops_footer(self):
+        import asyncio
+
+        async def run():
+            addrs, names = await _seed_hub_trace(self.db_path, n_subagents=4)
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            app = LiveApp(setup)
+            # Short enough that the per-agent detail alone (Address +
+            # Message + Timing + Delivery) doesn't leave room for the
+            # session-stats footer too.
+            async with app.run_test(size=(240, 24)) as pilot:
+                await _boot(pilot)
+                await _click_agent(pilot, app, "sub2")
+
+                plain = self._inspector_plain(app)
+                # The per-agent detail -- the higher layout priority --
+                # is intact, not truncated to make room for the footer.
+                self.assertIn("SubAgent2", plain)
+                self.assertIn("protocol: P1", plain)
+                self.assertIn("Delivery", plain)
+                # The footer -- lower priority -- is what drops instead.
+                self.assertNotIn("traces ·", plain)
+                self.assertNotIn("Failures", plain)
+
+        asyncio.run(run())
+
     def test_switching_trace_resets_selection_to_empty_state(self):
         import asyncio
 
@@ -348,6 +484,10 @@ class InspectorClickToRevealTests(unittest.TestCase):
                 await _boot(pilot)
                 await _click_agent(pilot, app, "sub1")
                 self.assertIn("SubAgent1", self._inspector_plain(app))
+                # Showing agent detail disarms the star link's hit region --
+                # nothing there to click back into while it's up.
+                widget = app.query_one("#inspector-content", InspectorCanvas)
+                self.assertIsNone(widget.star_link_rows)
 
                 # A second, separate trace for the same agents.
                 await _seed_hub_trace(self.db_path, trace_id="trace-b", n_subagents=3)
@@ -357,7 +497,10 @@ class InspectorClickToRevealTests(unittest.TestCase):
 
                 plain = self._inspector_plain(app)
                 self.assertIn(INSPECTOR_EMPTY_HINT, plain)
+                self.assertIn("Star uAgents on GitHub", plain)
                 self.assertNotIn("SubAgent1", plain)
+                # Back to the empty state -- the star link is clickable again.
+                self.assertIsNotNone(widget.star_link_rows)
 
         asyncio.run(run())
 
