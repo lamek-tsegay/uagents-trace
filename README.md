@@ -1,4 +1,4 @@
-# uagents-trace
+# trace-uagents
 
 Drop-in, read-only observability for [uAgents](https://github.com/fetchai/uAgents) message
 flow. It records spans for sends and receives to a local SQLite file and shows them live

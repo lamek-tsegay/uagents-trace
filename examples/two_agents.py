@@ -1,4 +1,4 @@
-"""Two local agents passing messages, fully instrumented with uagents-trace.
+"""Two local agents passing messages, fully instrumented with trace-uagents.
 
 Agent A pings Agent B every few seconds via `traced_send`; B replies via
 `traced_send` too. Both sides also use the `@trace` decorator on their

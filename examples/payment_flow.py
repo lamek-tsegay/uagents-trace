@@ -8,7 +8,7 @@ request is for an amount the seller's demo policy rejects, producing a
 RejectPayment leg instead, so the failure-outcome rendering has something
 real to show.
 
-Exercises uagents-trace's protocol recognition: a trace containing these
+Exercises trace-uagents's protocol recognition: a trace containing these
 messages should render as a labeled "PAYMENT" sequence with the FET amount
 and verify outcome, not generic Task/Result.
 

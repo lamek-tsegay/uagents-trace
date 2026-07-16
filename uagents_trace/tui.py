@@ -79,7 +79,7 @@ class TraceApp(App):
         yield Footer()
 
     async def on_mount(self) -> None:
-        self.title = "uagents-trace"
+        self.title = "trace-uagents"
         self.sub_title = "↑/↓ move   enter expand/collapse   q quit"
         await self.refresh_data()
         self.set_interval(POLL_SECONDS, self.refresh_data)

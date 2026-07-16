@@ -1,4 +1,4 @@
-"""Terminal viewer for uagents-trace spans -- no server, no browser.
+"""Terminal viewer for trace-uagents spans -- no server, no browser.
 
     uagents-trace list                 # recent traces
     uagents-trace show <trace_id>      # ASCII waterfall for one trace

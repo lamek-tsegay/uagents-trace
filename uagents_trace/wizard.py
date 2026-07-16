@@ -79,7 +79,7 @@ def _exit_on_cancel(value) -> None:
 
 def _print_header() -> None:
     console.print()
-    console.print(f"[bold white]uagents-trace[/] [dim {ACCENT}]·[/] [dim]message flow observer[/]")
+    console.print(f"[bold white]trace-uagents[/] [dim {ACCENT}]·[/] [dim]message flow observer[/]")
     console.print(
         f"[dim]Wrap sends with [bold]traced_send[/] and handlers with [bold]@trace[/] — "
         "this viewer records and displays only.[/]"

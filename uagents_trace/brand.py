@@ -10,11 +10,11 @@ FETCH_BRAND = """\
 ⢠⣶⣶⠀⠀⢀⣤⠀⠀⢀⣤⡀⠀⠀⠀⠀⠀⣿⣿⠀⠀⠈⢿⣧⡀⠀⠀⢀⣠⣄⠀⠀⢸⣿⡀⠀⠀⠹⣿⣄⠀⠀⠀⣠⣦⠀⢸⣿⡇⠀⠀⠀⢸⣿⠀⠀⣀⣀⠀⢻⣿⣄⠀⠀⠀⣰⣿⣿⠀⠀⣿⡇
 ⠸⠿⠿⠀⠀⠙⠟⠁⠀⠘⠿⠃⠀⠀⠀⠀⠀⠿⠿⠀⠀⠀⠈⠛⠿⣿⣿⡿⠟⠁⠀⠀⠈⠻⢿⡿⠇⠀⠙⠿⢿⣿⡿⠟⠋⠀⠸⠿⠇⠀⠀⠀⠸⠿⠀⠘⢿⡿⠀⠀⠙⠿⣿⣿⡿⠟⠿⠿⠀⠀⠿⠇
 
-                             uAgents Trace
+                             Trace uAgents
 """
 BRAND_PANEL_WIDTH = 76
 
-# All-caps wordmark for "uAgents Trace" (renders "TRACE" / "UAGENTS"), for
+# All-caps wordmark for "Trace uAgents" (renders "TRACE" / "UAGENTS"), for
 # use as the left slot of the side-by-side hero/fetch.ai lockup. Braille was
 # tried first, then several mixed-case figlet fonts (`smslant`, `standard`,
 # `big`) chasing a lowercase "u" -- but each of those read too thin/hollow
@@ -22,7 +22,7 @@ BRAND_PANEL_WIDTH = 76
 # double-line block glyphs are the closest match in visual weight to that
 # mark, and its being all-caps (no lowercase forms exist in this font) is an
 # accepted tradeoff for that. Rendering both words on one line
-# (`pyfiglet.figlet_format("uAgents Trace", ...)`) made the hero 106
+# (`pyfiglet.figlet_format("Trace uAgents", ...)`) made the hero 106
 # columns wide -- far wider than the mark's 72, forcing a lopsided lockup
 # and a very wide side-by-side breakpoint. Rendering each word as its own
 # banner (`pyfiglet.figlet_format("uAgents", font="ansi_shadow")` and

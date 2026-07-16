@@ -2,7 +2,7 @@
 ChatMessage/ChatAcknowledgement models ASI:One uses to thread a
 conversation -- instead of two_agents.py's plain custom Ping/Pong models.
 
-Exercises uagents-trace's protocol recognition: spans for these messages
+Exercises trace-uagents's protocol recognition: spans for these messages
 should show up labeled "Chat Protocol" rather than just the bare class name,
 and grouped by session (uAgents' `ctx.session`, which is how ASI:One threads
 a single conversation across turns).

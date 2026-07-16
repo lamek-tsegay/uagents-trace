@@ -88,10 +88,10 @@ def resolve_port(host: str = HOST, requested: int = DEFAULT_PORT) -> int:
         _debug_log(
             "A",
             "server.py:resolve_port",
-            "existing uagents-trace server detected",
+            "existing trace-uagents server detected",
             {"host": host, "port": requested},
         )
-        print(f"uagents-trace web UI is already running at http://{host}:{requested}")
+        print(f"trace-uagents web UI is already running at http://{host}:{requested}")
         sys.exit(0)
 
     in_use = _port_in_use(host, requested)
@@ -141,7 +141,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="uagents-trace", lifespan=lifespan)
+app = FastAPI(title="trace-uagents", lifespan=lifespan)
 
 
 @app.get("/")

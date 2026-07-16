@@ -1,4 +1,4 @@
-"""Three dummy agents for testing uagents-trace.
+"""Three dummy agents for testing trace-uagents.
 
 Alice fans out to Bob and John every 5 seconds (hub-shaped trace).
 Both reply back to Alice.
