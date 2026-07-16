@@ -50,6 +50,13 @@ from .wizard import ViewMode, WatchSetup
 POLL_SECONDS = 3.0
 # Pending-indicator blink — slower than poll so the diagram is not constantly redrawing.
 PULSE_SECONDS = 1.5
+# The empty-state logo shimmer's own, much faster clock (see
+# _shimmer_logo_text / LiveApp._shimmer_tick) -- riding PULSE_SECONDS made
+# a full 12-row sweep take ~18s and read as barely moving. Only ticks while
+# the empty state is actually showing (LiveApp._start_shimmer_timer/
+# _stop_shimmer_timer), so it doesn't burn cycles once an agent is
+# selected.
+SHIMMER_INTERVAL_SECONDS = 0.15
 MAX_EVENTS = 15
 MAX_TRACE_LIST = 25
 TRACE_WIDGET_PREFIX = "trace-"
@@ -1324,6 +1331,46 @@ class SplashScreen(Screen):
         event.stop()
         self._dismissed = True
         self.app.pop_screen()
+
+
+
+
+# Shimmer step indices into _HERO_FADE_COLORS (0 = full SPLASH_HERO_GREEN,
+# FADE_STEPS = SPLASH_BG) -- reusing the splash's own precomputed fade ramp
+# for the logo's idle animation instead of a second one, so the two share
+# one notion of "how green fades to background".
+_SHIMMER_NEAR = 4
+_SHIMMER_FAR = 8
+
+
+def _shimmer_logo_text(tick: int) -> Text:
+    """The hero wordmark with a bright band swept down it, one row per
+    `tick` -- `LiveApp._shimmer_tick_count`, advanced by its own dedicated,
+    fast `set_interval` (`SHIMMER_INTERVAL_SECONDS`), not the ~1.5s pulse
+    tick everything else in the live TUI shares. A full sweep at one row
+    per *pulse* tick took ~18s and read as barely moving; this needs its
+    own faster clock to read as continuous motion instead. Wraps back to
+    row 0 after the last row (treating the rows as circular, so the sweep
+    loops smoothly instead of jumping back to the top). The center row of
+    the band renders at full brightness, its two neighbors a medium shade,
+    everything else dim -- deliberately a clearly-visible "scanning"
+    shimmer, not a subtle one-step flicker, per "playful = noticeable".
+    """
+    rows = len(_HERO_LINES_PADDED)
+    center = tick % rows
+    text = Text(justify="center")
+    for i, line in enumerate(_HERO_LINES_PADDED):
+        if i:
+            text.append("\n")
+        distance = min(abs(i - center), rows - abs(i - center))
+        if distance == 0:
+            color = _HERO_FADE_COLORS[0]
+        elif distance == 1:
+            color = _HERO_FADE_COLORS[_SHIMMER_NEAR]
+        else:
+            color = _HERO_FADE_COLORS[_SHIMMER_FAR]
+        text.append(line, style=f"bold {color}")
+    return text
 
 
 class DiagramCanvas(Static):
