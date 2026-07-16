@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 from textual import events
-from textual.containers import VerticalScroll
+from textual.containers import HorizontalScroll, VerticalScroll
 
 from uagents_trace.live import DiagramCanvas, INSPECTOR_EMPTY_HINT, LiveApp
 from uagents_trace.store import init_db, insert_span, set_alias
@@ -127,12 +127,17 @@ async def _boot(pilot):
 
 async def _click_agent(pilot, app, address: str) -> None:
     """Simulate clicking the agent's box in the diagram -- computes the
-    click offset from the same hit_regions/left_pad the widget itself
-    hit-tests against, rather than hardcoding coordinates.
+    click offset from the same hit_regions the widget itself hit-tests
+    against, rather than hardcoding coordinates. No left_pad term: Textual
+    translates a click into the widget's own local content-coordinate
+    space (absorbing both CSS alignment and any horizontal scroll offset)
+    before `on_click` sees it, and `pilot.click`'s `offset=` is relative
+    to that same widget-region math -- so a raw hit_region coordinate
+    resolves to the right on-screen position either way.
     """
     content = app.query_one("#diagram-content", DiagramCanvas)
     x0, y0, x1, y1 = content.hit_regions[address]
-    cx = content.left_pad + (x0 + x1) // 2
+    cx = (x0 + x1) // 2
     cy = (y0 + y1) // 2
     await pilot.click("#diagram-content", offset=(cx, cy))
     await pilot.pause()
@@ -355,6 +360,229 @@ class InspectorClickToRevealTests(unittest.TestCase):
                 self.assertNotIn("SubAgent1", plain)
 
         asyncio.run(run())
+
+
+class DiagramScrollClickTests(unittest.TestCase):
+    """Slice 2 of the scrollable-diagram work: `left_pad`'s manual
+    centering-offset correction is gone from `DiagramCanvas.on_click`,
+    replaced by trusting Textual's own click-coordinate translation (which
+    already absorbs both CSS alignment and horizontal scroll offset before
+    `on_click` ever sees the event -- confirmed empirically in the recon
+    for this work, not just from documentation). These tests prove that
+    trust is warranted inside the real running app, not just in isolated
+    experiments -- especially the click-after-scroll case, which is the
+    one old `left_pad` scheme could never have gotten right.
+    """
+
+    def setUp(self):
+        fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+
+    def tearDown(self):
+        try:
+            os.remove(self.db_path)
+        except OSError:
+            pass
+
+    def _inspector_plain(self, app) -> str:
+        widget = app.query_one("#inspector-content")
+        content = widget._Static__content
+        return content.plain if hasattr(content, "plain") else str(content)
+
+    def _diagram_plain(self, app) -> str:
+        content = app.query_one("#diagram-content", DiagramCanvas)
+        text = content._Static__content
+        return text.plain if hasattr(text, "plain") else str(text)
+
+    def _has_double_border_box(self, app, address: str) -> bool:
+        """Whether the rendered diagram shows a double-line border (╔/╚)
+        anywhere within the given agent's own hit_region rows -- the
+        visual marker `build_hub_topology` draws only for the currently
+        `selected` agent.
+        """
+        content = app.query_one("#diagram-content", DiagramCanvas)
+        x0, y0, x1, y1 = content.hit_regions[address]
+        lines = self._diagram_plain(app).split("\n")
+        for y in range(y0, y1):
+            if y >= len(lines):
+                continue
+            row = lines[y][x0:x1]
+            if "╔" in row or "╚" in row or "║" in row:
+                return True
+        return False
+
+    def test_click_after_scroll_selects_the_visible_agent(self):
+        import asyncio
+
+        async def run():
+            addrs, names = await _seed_hub_trace(self.db_path, n_subagents=5)
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            app = LiveApp(setup)
+            # Narrow enough that a 5-agent diagram (natural floor ~125
+            # cols) can't fit -- forces #diagram-scroll to actually scroll.
+            async with app.run_test(size=(150, 45)) as pilot:
+                await _boot(pilot)
+
+                content = app.query_one("#diagram-content", DiagramCanvas)
+                scroller = app.query_one("#diagram-scroll", HorizontalScroll)
+                self.assertGreater(
+                    scroller.max_scroll_x, 0, "diagram should overflow its viewport for this to be a real test"
+                )
+
+                # sub5 is off-screen at the default hub-centered scroll
+                # position -- confirm the test's own premise before relying
+                # on it.
+                panel_width = app._diagram_panel_width()
+                x0, _y0, x1, _y1 = content.hit_regions["sub5"]
+                self.assertGreater(
+                    x1,
+                    scroller.scroll_offset.x + panel_width,
+                    "test assumption violated: sub5 should start off-screen",
+                )
+
+                # Scroll it into view, then click it -- no left_pad term
+                # anywhere in this path (see _click_agent).
+                scroller.scroll_to(x=scroller.max_scroll_x, animate=False)
+                await pilot.pause()
+                await _click_agent(pilot, app, "sub5")
+
+                self.assertEqual(app._selected_agent, "sub5")
+                self.assertIn("SubAgent5", self._inspector_plain(app))
+                # Selection indicator (item 5): the double-border box shows
+                # up on sub5 specifically, in the scrolled case.
+                self.assertTrue(self._has_double_border_box(app, "sub5"))
+
+        asyncio.run(run())
+
+    def test_click_fits_without_scroll_still_selects_correctly(self):
+        """Regression guard for the common case: with left_pad gone, a
+        diagram that fits (no scrolling involved at all) must still center
+        via CSS alone and still click correctly.
+        """
+        import asyncio
+
+        async def run():
+            addrs, names = await _seed_hub_trace(self.db_path, n_subagents=2)
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            app = LiveApp(setup)
+            async with app.run_test(size=(240, 45)) as pilot:
+                await _boot(pilot)
+
+                scroller = app.query_one("#diagram-scroll", HorizontalScroll)
+                self.assertEqual(scroller.max_scroll_x, 0, "diagram should fit without scrolling at this width")
+
+                await _click_agent(pilot, app, "sub2")
+
+                self.assertEqual(app._selected_agent, "sub2")
+                self.assertIn("SubAgent2", self._inspector_plain(app))
+                # Selection indicator (item 5): also present in the
+                # unscrolled/CSS-centered-only case.
+                self.assertTrue(self._has_double_border_box(app, "sub2"))
+
+        asyncio.run(run())
+
+    def test_click_at_stale_prescroll_position_does_not_select_moved_agent(self):
+        """After scrolling, a click at the screen position an agent USED
+        to occupy must not select that agent -- it should match whatever
+        (if anything) is actually visible there now, not a stale
+        hit_region-to-screen mapping from before the scroll.
+        """
+        import asyncio
+
+        async def run():
+            addrs, names = await _seed_hub_trace(self.db_path, n_subagents=5)
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            app = LiveApp(setup)
+            async with app.run_test(size=(150, 45)) as pilot:
+                await _boot(pilot)
+
+                content = app.query_one("#diagram-content", DiagramCanvas)
+                scroller = app.query_one("#diagram-scroll", HorizontalScroll)
+                self.assertGreater(scroller.max_scroll_x, 0)
+
+                # sub2's absolute on-screen position at the default
+                # (hub-centered) scroll -- confirmed via the hit_region
+                # math itself rather than an actual click, so this test
+                # doesn't trigger an extra _refresh_display() (which would
+                # re-arm the hub-centering scroll and confuse the timing).
+                x0, y0, x1, y1 = content.hit_regions["sub2"]
+                screen_x = content.region.x + (x0 + x1) // 2
+                screen_y = content.region.y + (y0 + y1) // 2
+                local_x = screen_x - content.region.x
+                self.assertTrue(x0 <= local_x < x1, "test assumption: this screen position starts inside sub2's box")
+
+                # Scroll further right -- sub2's box moves off that screen
+                # position (shifts left on screen as scroll increases).
+                scroller.scroll_to(x=scroller.max_scroll_x, animate=False)
+                await pilot.pause()
+
+                # Click the exact same absolute screen coordinates as
+                # before scrolling.
+                await pilot.click(offset=(screen_x, screen_y))
+                await pilot.pause()
+
+                self.assertNotEqual(app._selected_agent, "sub2")
+
+        asyncio.run(run())
+
+
+class InspectorVisibilityThresholdTests(unittest.TestCase):
+    """MIN_WIDTH_FOR_INSPECTOR's hide/show boundary. Lowered from 228 to
+    180 as the final slice of the scrollable-diagram work (see
+    DiagramScrollClickTests above): the diagram no longer needs
+    worst-case width reserved for it, since it scrolls instead of
+    clipping when it doesn't fit -- so the threshold only needs to
+    reserve a comfortable minimum. No test previously pinned the old 228
+    value (confirmed via grep before this change), so this is new
+    coverage, not an edit to an existing assertion.
+    """
+
+    def setUp(self):
+        fd, self.db_path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+
+    def tearDown(self):
+        try:
+            os.remove(self.db_path)
+        except OSError:
+            pass
+
+    def _measure(self, width: int) -> tuple[bool, int]:
+        """(inspector_visible, diagram_col_width) after boot at the given
+        terminal width. Each call seeds its own trace_id, since a test
+        method may call this more than once against the same db_path --
+        reusing "trace-hub" (the seeder's default) would collide on span
+        ids the second time.
+        """
+        import asyncio
+
+        async def run():
+            addrs, names = await _seed_hub_trace(self.db_path, trace_id=f"trace-{width}", n_subagents=2)
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            app = LiveApp(setup)
+            async with app.run_test(size=(width, 45)) as pilot:
+                await _boot(pilot)
+                visible = app.query_one("#inspector-col").display
+                diagram_col_width = app.query_one("#diagram-col").size.width
+            return visible, diagram_col_width
+
+        return asyncio.run(run())
+
+    def test_inspector_hidden_just_below_threshold(self):
+        visible, _ = self._measure(179)
+        self.assertFalse(visible)
+
+    def test_inspector_shown_at_threshold(self):
+        visible, _ = self._measure(180)
+        self.assertTrue(visible)
+
+    def test_diagram_col_reclaims_width_when_inspector_hidden(self):
+        # No dead gap: #diagram-col (width: 1fr) should absorb roughly the
+        # ~76-col inspector column (plus the space that would've separated
+        # them) the moment the inspector hides, not leave it empty.
+        _, width_hidden = self._measure(179)
+        _, width_shown = self._measure(180)
+        self.assertGreater(width_hidden, width_shown + 50)
 
 
 if __name__ == "__main__":

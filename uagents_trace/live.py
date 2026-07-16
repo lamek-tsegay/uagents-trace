@@ -17,7 +17,7 @@ from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, HorizontalScroll, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import Screen
 from textual.widgets import Footer, Header, Label, ListItem, ListView, RichLog, Static
@@ -34,7 +34,6 @@ from .network_canvas import (
     build_hub_topology,
     build_peer_hit_regions,
     build_peer_topology,
-    center_in_width,
     format_ms,
 )
 from .shape import HUB, Hop, TraceState, TreeNode, build_hops, build_trace_state
@@ -53,13 +52,25 @@ TRACE_WIDGET_PREFIX = "trace-"
 MUTED = "#6b7280"
 
 # Inspector column -- third, fixed-width column right of the diagram. Below
-# MIN_WIDTH_FOR_INSPECTOR it hides itself entirely rather than shrink, since
-# the diagram (a 4-subagent hub trace renders ~100 cols wide, see
-# network_canvas.build_hub_topology) must stay legible first. 228 = sidebar
-# (~48 incl. border) + a diagram column wide enough for that hub layout
-# without cramming (~106) + the inspector column (BRAND_PANEL_WIDTH=76 incl.
-# border).
-MIN_WIDTH_FOR_INSPECTOR = 228
+# MIN_WIDTH_FOR_INSPECTOR it hides itself entirely rather than shrink.
+#
+# Now that #diagram-scroll (see its own CSS/comment below) lets the diagram
+# render at its natural size and scroll horizontally instead of being
+# force-squeezed to fit, this threshold no longer has to reserve
+# worst-case width for the widest realistic trace -- a diagram that
+# doesn't fit the reduced diagram-col width just scrolls (hub-centered,
+# boxes intact), it doesn't clip or overlap. So this reserves a
+# comfortable MINIMUM diagram width instead of a worst case:
+#   180 = sidebar (46) + minimum diagram (50, the 2-agent/peer floor --
+#         see network_canvas._agent_columns/_compute_peer_layout -- + 8
+#         for #diagram-col's own border/padding overhead, matching
+#         _diagram_panel_width's own -8) + inspector (76, BRAND_PANEL_WIDTH
+#         incl. border)
+# A trace with more agents than that comfortably fits is still fully
+# usable with the inspector open -- it scrolls. (Was 228, calibrated
+# pre-scrolling to avoid ever needing to scroll; see the scrollable-diagram
+# work's 3-slice history for the measurements behind both numbers.)
+MIN_WIDTH_FOR_INSPECTOR = 180
 
 # Textual CSS can't interpolate a Python constant into #inspector-col's
 # `width:` (braces in an f-string would collide with CSS block syntax), so
@@ -201,30 +212,6 @@ def _latest_peer_round_trip(hops: list[Hop]) -> tuple[Hop | None, Hop | None]:
     return hops[-1], None
 
 
-def build_peer_network_diagram(
-    hops: list[Hop],
-    alias_map: dict[str, str],
-    *,
-    pulse: bool = False,
-) -> Text:
-    """Two-agent bidirectional network view for the latest hop pair."""
-    if not hops:
-        return Text(
-            "  Waiting for messages…\n\n"
-            "  Start your instrumented agents\n"
-            "  in another terminal.",
-            style="dim",
-        )
-
-    outbound, reply = _latest_peer_round_trip(hops)
-    if outbound is None:
-        return Text("  Waiting for messages…", style="dim")
-
-    left = display_name(outbound.source, alias_map)
-    right = display_name(outbound.dest, alias_map)
-    state = outbound.state
-    leg_state = "completed" if state == "delivered" and reply else ("failed" if state in ("dropped", "timeout") else "pending")
-
 DiagramPieces = tuple[Text, dict[str, tuple[int, int, int, int]]]
 
 
@@ -234,20 +221,33 @@ def _hub_diagram_pieces(
     *,
     pulse: bool = False,
     selected: str | None = None,
+    available_width: int | None = None,
+    available_height: int | None = None,
 ) -> DiagramPieces:
     """(topology, hit_regions) for a hub trace. `hit_regions` maps each
     subagent's *address* to its clickable box region; `selected`, if given,
     is the currently-selected agent's address, highlighted with a double
-    border in the topology.
+    border in the topology. `available_width`/`available_height` are the
+    panel's real size (see `LiveApp._diagram_panel_width/_height`) -- passed
+    to both the renderer and the hit-region builder so a box's drawn
+    position and its clickable region never diverge.
     """
     legs = state.legs
     orch_name = display_name(state.hub, alias_map)
     agent_names = [display_name(leg["subagent"], alias_map) for leg in legs]
     selected_name = display_name(selected, alias_map) if selected else None
-    topology = build_hub_topology(legs, orch_name, agent_names, pulse=pulse, selected=selected_name)
+    topology = build_hub_topology(
+        legs,
+        orch_name,
+        agent_names,
+        pulse=pulse,
+        selected=selected_name,
+        available_width=available_width,
+        available_height=available_height,
+    )
     if not legs:
         return topology, {}
-    regions = build_hub_hit_regions(legs, orch_name, agent_names)
+    regions = build_hub_hit_regions(legs, orch_name, agent_names, available_width, available_height)
     hit_regions = {leg["subagent"]: region for leg, region in zip(legs, regions)}
     return topology, hit_regions
 
@@ -258,6 +258,8 @@ def _peer_diagram_pieces(
     *,
     pulse: bool = False,
     selected: str | None = None,
+    available_width: int | None = None,
+    available_height: int | None = None,
 ) -> DiagramPieces:
     """(topology, hit_regions) for a peer trace -- mirrors `_hub_diagram_pieces`."""
     if not hops:
@@ -284,8 +286,16 @@ def _peer_diagram_pieces(
     )
     selected_name = display_name(selected, alias_map) if selected else None
 
-    topology = build_peer_topology(left, right, state=leg_state, pulse=pulse, selected=selected_name)
-    left_box, right_box = build_peer_hit_regions(left, right)
+    topology = build_peer_topology(
+        left,
+        right,
+        state=leg_state,
+        pulse=pulse,
+        selected=selected_name,
+        available_width=available_width,
+        available_height=available_height,
+    )
+    left_box, right_box = build_peer_hit_regions(left, right, available_width, available_height)
     hit_regions = {outbound.source: left_box, outbound.dest: right_box}
     return topology, hit_regions
 
@@ -825,12 +835,6 @@ _BRAND_TITLE_LINE = _FETCH_BRAND_LINES[-1].strip()
 # padding spaces, but `"uAgent Trace".strip()` is non-empty, so it would
 # survive the blank filter and get treated as an extra braille row.
 _FETCH_LOGO_LINES = [line for line in _FETCH_BRAND_LINES[:-1] if line.strip()]
-# One-line mark for the inspector header -- the first glyph block of the
-# full logo (row 0, up to the first double-blank run) plus the wordmark, so
-# the brand stays visible in the header even while the panel body is
-# showing inspector detail instead of the empty-state logo.
-_BRAND_MARK_TEXT = Text(f"{_FETCH_LOGO_LINES[0][:11]}  {_BRAND_TITLE_LINE}", style=f"bold {ACCENT}")
-
 # Splash body: a co-branded lockup of the "Trace uAgents" figlet hero (bold)
 # and the full-resolution fetch.ai braille mark (normal weight) -- not the
 # downsampled `FETCH_BRAND_SMALL`, which drops dots and reads broken at any
@@ -1152,14 +1156,19 @@ class DiagramCanvas(Static):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        # address -> (x0, y0, x1, y1), in this widget's own local
-        # coordinates once `left_pad` (the horizontal centering offset
-        # applied when the topology was rendered) is subtracted.
+        # address -> (x0, y0, x1, y1), in the topology's own local
+        # coordinates -- the same frame `event.x`/`event.y` already arrive
+        # in below. Textual translates a click into a widget's own local
+        # content space before `on_click` ever sees it, transparently
+        # absorbing both CSS alignment offset (#diagram-scroll's `align:
+        # center middle`) and horizontal scroll offset -- so no manual
+        # correction is needed here, unlike the old `left_pad` scheme this
+        # replaced (which broke under scroll, since it only accounted for
+        # centering).
         self.hit_regions: dict[str, tuple[int, int, int, int]] = {}
-        self.left_pad = 0
 
     def on_click(self, event: events.Click) -> None:
-        x = event.x - self.left_pad
+        x = event.x
         y = event.y
         for agent, (x0, y0, x1, y1) in self.hit_regions.items():
             if x0 <= x < x1 and y0 <= y < y1:
@@ -1184,7 +1193,23 @@ class LiveApp(App):
         color: #6b7280;
     }
     #main-row {
-        height: 26;
+        height: 1fr;
+        /* 17 = the hub diagram's own hard floor (_HUB_FIXED_ROWS=9 +
+           MIN_STEM_HEIGHT=2 + MIN_DROP_HEIGHT=3 = 14 rows, see
+           network_canvas._hub_vertical_spacing, which never renders
+           shorter regardless of available_height) + #diagram-col's own
+           2-row border + 1 row for #diagram-scroll's horizontal
+           scrollbar, which is visible (not scrollbar-size-horizontal: 0)
+           and reserves an interior row whenever the diagram overflows its
+           viewport -- reserved unconditionally here rather than only when
+           scrolling is active, so a diagram that starts fitting and later
+           grows past the viewport (more agents join the trace) doesn't
+           shift the whole layout by a row mid-session. Below this, the
+           diagram's bottom row clips against whatever's below it on
+           screen -- #diagram-col isn't vertically scrollable. #events-panel's
+           height is sized to still fit alongside this minimum on a small
+           (~80x24) terminal. */
+        min-height: 17;
     }
     #trace-list {
         width: 46;
@@ -1195,6 +1220,9 @@ class LiveApp(App):
     }
     #trace-list > ListView {
         height: 100%;
+    }
+    #trace-list ListItem {
+        height: 3;
     }
     #trace-list Label {
         color: #9ca3af;
@@ -1210,29 +1238,31 @@ class LiveApp(App):
         background: #0d1210;
         padding: 0 2;
     }
+    #diagram-scroll {
+        width: 100%;
+        height: 1fr;
+        /* Centers the diagram when it's narrower than the viewport;
+           inert (scroll position governs instead) when it's wider --
+           see DiagramCanvas/#diagram-content below. Moved here from
+           #diagram-col now that #diagram-col holds a scroll container
+           instead of the canvas directly. */
+        align: center middle;
+    }
     #diagram-content {
-        width: 100%;
+        /* auto, not 100% -- the core fix. A 100%-wide canvas gets
+           force-squeezed to the panel width, which truncates each ASCII
+           row of the diagram independently instead of scrolling, causing
+           boxes to visually overlap/spill on a wide (e.g. 5-agent) hub
+           trace. auto lets the canvas render at its true natural size
+           (network_canvas's own grow/floor/cap logic, unchanged) and
+           #diagram-scroll handles the rest: centered if it fits, scrolls
+           if it doesn't. */
+        width: auto;
         height: auto;
-    }
-    #leg-table-content {
-        width: 100%;
-        height: auto;
-        margin-top: 1;
-    }
-    #trace-summary {
-        width: 100%;
-        height: auto;
-        margin-top: 1;
     }
     #inspector-col {
         width: 76;
         height: 100%;
-    }
-    #inspector-header {
-        height: 1;
-        padding: 0 1;
-        color: #34d399;
-        background: #111916;
     }
     #inspector-scroll {
         height: 1fr;
@@ -1249,14 +1279,18 @@ class LiveApp(App):
         height: auto;
         color: #6b7280;
     }
-    #events-header {
-        height: 1;
-        padding: 0 2;
-        color: #6b7280;
-        background: #0a0f0d;
-    }
     #events-panel {
-        height: 1fr;
+        /* 5, not 6 -- #main-row's min-height grew from 16 to 17 (see its
+           own comment) to reserve #diagram-scroll's scrollbar row, and
+           the two heights share the same fixed vertical budget on a small
+           (~80x24) terminal: 22 rows available for #main-row +
+           #events-panel combined (24 - 1 header - 1 footer). 17 + 6 = 23
+           overflows that budget by 1 row, which clipped #events-panel's
+           own bottom border in exactly the same way the pre-scrolling
+           diagram used to clip -- confirmed by rendering a scroll-forcing
+           trace at 80x24 during Slice 1 of the scrollable-diagram work.
+           17 + 5 = 22 fits exactly, same zero-slack pattern as before. */
+        height: 5;
         border: round #1f3d32;
         background: #080c0a;
         padding: 0 1;
@@ -1290,6 +1324,12 @@ class LiveApp(App):
         self._bootstrapped = False
         self._follow_latest = True
         self._pulse_on = False
+        # Whether the newest feed line is currently rendered in its
+        # brighter "just arrived" style -- set when a line is appended,
+        # cleared (and the log re-rendered plain) on the next pulse tick,
+        # so a burst of activity flashes for exactly one pulse interval
+        # rather than staying bright indefinitely.
+        self._flash_active = False
         self._trace_state: TraceState | None = None
         # Address of the agent whose box was last clicked -- None means
         # nothing selected, so the inspector shows the empty-state hint
@@ -1312,17 +1352,21 @@ class LiveApp(App):
         yield Header(show_clock=False)
         with Vertical():
             with Horizontal(id="main-row"):
-                yield ListView(id="trace-list")
+                trace_list = ListView(id="trace-list")
+                # A one-time, compact scale hint for the latency bar (see
+                # _latency_bar) -- discoverable without repeating it on
+                # every row or adding a dedicated legend row.
+                trace_list.border_title = f"Traces · bar caps @{LATENCY_BAR_SCALE_MS // 1000}s"
+                yield trace_list
                 with Vertical(id="diagram-col"):
-                    yield DiagramCanvas("", id="diagram-content")
-                    yield Static("", id="leg-table-content")
-                    yield Static("", id="trace-summary")
+                    with HorizontalScroll(id="diagram-scroll"):
+                        yield DiagramCanvas("", id="diagram-content")
                 with Vertical(id="inspector-col"):
-                    yield Static(_BRAND_MARK_TEXT, id="inspector-header")
                     with VerticalScroll(id="inspector-scroll", classes="inspector-empty"):
-                        yield Static(Text(INSPECTOR_EMPTY_HINT, style="dim"), id="inspector-content")
-            yield Static("Live messages", id="events-header")
-            yield RichLog(id="events-panel", highlight=False, markup=False, auto_scroll=True)
+                        yield Static(_inspector_logo_text(), id="inspector-content")
+            events_log = RichLog(id="events-panel", highlight=False, markup=False, auto_scroll=True)
+            events_log.border_title = "Live messages"
+            yield events_log
         yield Footer()
 
     def on_resize(self, event: events.Resize) -> None:
@@ -1360,6 +1404,13 @@ class LiveApp(App):
         if not self._bootstrapped:
             return
         self._pulse_on = not self._pulse_on
+        if self._flash_active:
+            # One pulse interval of flash is up -- revert the newest feed
+            # line to its normal style. Only re-renders the log when a
+            # flash is actually pending, so an idle feed doesn't get its
+            # scroll position reset every pulse for no reason.
+            self._flash_active = False
+            self._render_events_log(flash=False)
         await self._refresh_display(pulse_only=True)
 
     async def _bootstrap(self) -> None:
@@ -1406,22 +1457,35 @@ class LiveApp(App):
                 state = build_trace_state(spans, hub_hint=self._hub_hint())
                 self._trace_rollup_cache[t["trace_id"]] = state
 
-            label_text, style = sidebar_label(t["trace_id"], state, self._alias_map)
+            label_text, _style = sidebar_label(t["trace_id"], state, self._alias_map)
             try:
                 item = trace_list.query_one(f"#{_trace_widget_id(t['trace_id'])}", ListItem)
                 label_widget = item.query_one(Label)
-                label_widget.update(_sidebar_markup(label_text, style))
+                label_widget.update(label_text)
             except Exception:
                 pass
 
+    def _render_events_log(self, *, flash: bool) -> None:
+        """Redraw the bounded feed from `self._events` -- the one rendering
+        path for both a normal reload and a flash/revert, so the on-screen
+        log can never hold more (or differently-styled) lines than
+        `self._events` says it should. When `flash` is set, only the
+        newest line (last in the bounded deque) gets the brighter style.
+        """
+        events_log = self.query_one("#events-panel", RichLog)
+        events_log.clear()
+        lines = list(self._events)
+        last_index = len(lines) - 1
+        for i, line in enumerate(lines):
+            events_log.write(_flash_line(line) if flash and i == last_index else line)
+
     async def _append_new_feed_events(self) -> bool:
-        """Write any not-yet-logged, terminal hops for the active trace.
+        """Record any not-yet-logged, terminal hops for the active trace.
         Shared by the initial load and by polling so the feed always
         derives from one authoritative, fully-deduplicated hop list.
         """
         if not self._active_trace_id:
             return False
-        events_log = self.query_one("#events-panel", RichLog)
         spans = await get_trace_spans(self.db_path, self._active_trace_id)
         if self.addresses:
             spans = [s for s in spans if _span_in_watch(s, self.addresses)]
@@ -1433,18 +1497,20 @@ class LiveApp(App):
             if hop.id in self._logged_hop_ids:
                 continue
             self._logged_hop_ids.add(hop.id)
-            line = format_event_line(hop, self._alias_map)
-            self._events.append(line)
-            events_log.write(line)
+            self._events.append(format_event_line(hop, self._alias_map))
             appended = True
+
+        if appended:
+            self._flash_active = True
+            self._render_events_log(flash=True)
 
         return appended
 
     async def _reload_feed_for_active_trace(self) -> None:
-        events_log = self.query_one("#events-panel", RichLog)
-        events_log.clear()
         self._events.clear()
         self._logged_hop_ids.clear()
+        self._flash_active = False
+        self._render_events_log(flash=False)
         await self._append_new_feed_events()
 
     async def _select_trace(self, trace_id: str, *, follow: bool | None = None) -> None:
@@ -1538,48 +1604,32 @@ class LiveApp(App):
         # Inner width: subtract horizontal padding (2+2) and border (1+1).
         return max(col.size.width - 8, 0)
 
-    def _center_for_panel(self, renderable: Text) -> Text:
-        width = self._diagram_panel_width()
-        if width < 20:
-            return renderable
-        return center_in_width(renderable, width)
-
-    def _topology_left_pad(self, topology: Text) -> int:
-        """The horizontal padding `_center_for_panel` applied to the
-        topology -- needed to translate a click's widget-local x back into
-        the topology's own (uncentered) coordinate frame that hit_regions
-        are expressed in. Mirrors `center_in_width`'s own padding math.
-        """
-        width = self._diagram_panel_width()
-        if width < 20:
-            return 0
-        return max(0, (width - block_width(topology)) // 2)
+    def _diagram_panel_height(self) -> int:
+        col = self.query_one("#diagram-col")
+        # Inner height: subtract border (1+1) -- no vertical padding on
+        # #diagram-col. Fed to network_canvas as available_height so the
+        # diagram's connector lines can grow to use the panel's real height
+        # instead of sitting at a small fixed size inside it.
+        return max(col.size.height - 2, 0)
 
     async def _refresh_display(self, *, pulse_only: bool = False) -> None:
         content = self.query_one("#diagram-content", DiagramCanvas)
-        table_content = self.query_one("#leg-table-content", Static)
-        summary_content = self.query_one("#trace-summary", Static)
         inspector = self.query_one("#inspector-content", Static)
         inspector_scroll = self.query_one("#inspector-scroll", VerticalScroll)
 
         if not self._active_trace_id:
             if not pulse_only:
                 content.update(
-                    self._center_for_panel(
-                        Text(
-                            "Waiting for messages…\n\n"
-                            "Start your instrumented agents\n"
-                            "in another terminal.",
-                            style="dim",
-                        )
+                    Text(
+                        "Waiting for messages…\n\n"
+                        "Start your instrumented agents\n"
+                        "in another terminal.",
+                        style="dim",
                     )
                 )
                 content.hit_regions = {}
-                content.left_pad = 0
-                table_content.update("")
-                summary_content.update("")
                 inspector_scroll.set_class(True, "inspector-empty")
-                inspector.update(Text(INSPECTOR_EMPTY_HINT, style="dim"))
+                inspector.update(_inspector_logo_text())
             return
 
         spans = await get_trace_spans(self.db_path, self._active_trace_id)
@@ -1590,8 +1640,16 @@ class LiveApp(App):
         self._trace_state = state
 
         pulse = self._pulse_on and state.pending > 0
-        table_block: Text | None = None
         hit_regions: dict[str, tuple[int, int, int, int]] = {}
+        available_width = self._diagram_panel_width()
+        available_height = self._diagram_panel_height()
+
+        # Only the star/hub topology centers its hub horizontally within
+        # the diagram's total width -- peer topology has no hub, and the
+        # tree view left-anchors its root instead of centering it -- so
+        # only this branch is a candidate for the hub-centered initial
+        # scroll below.
+        is_star_hub_topology = False
 
         if state.total == 0:
             topology = Text("Waiting for messages in this trace…", style="dim")
@@ -1599,28 +1657,61 @@ class LiveApp(App):
             if self.view_mode == "tree" and state.tree is not None:
                 topology = build_hub_tree_diagram(state.tree, self._alias_map)
             else:
-                topology, table_block, hit_regions = _hub_diagram_pieces(
-                    state, self._alias_map, pulse=pulse, selected=self._selected_agent
+                is_star_hub_topology = True
+                topology, hit_regions = _hub_diagram_pieces(
+                    state,
+                    self._alias_map,
+                    pulse=pulse,
+                    selected=self._selected_agent,
+                    available_width=available_width,
+                    available_height=available_height,
                 )
         else:
-            topology, table_block, hit_regions = _peer_diagram_pieces(
-                state.hops, self._alias_map, pulse=pulse, selected=self._selected_agent
+            topology, hit_regions = _peer_diagram_pieces(
+                state.hops,
+                self._alias_map,
+                pulse=pulse,
+                selected=self._selected_agent,
+                available_width=available_width,
+                available_height=available_height,
             )
 
-        # Diagram and table are two separate, independently top-anchored
-        # widgets stacked in #diagram-col (see CSS) -- centering each
-        # against the panel's real width, rather than baking both into one
-        # combined block, is what pins the diagram to the top with the
-        # table directly beneath it instead of both floating as one unit.
-        content.update(self._center_for_panel(topology))
+        content.update(topology)
         content.hit_regions = hit_regions
-        content.left_pad = self._topology_left_pad(topology)
-        table_content.update(self._center_for_panel(table_block) if table_block is not None else "")
 
         if not pulse_only:
-            summary_content.update(
-                self._center_for_panel(build_trace_summary_line(self._active_trace_id, state, self._alias_map))
-            )
+            # Hub-centered initial scroll: when the star/hub topology
+            # overflows its viewport, land on its horizontal center (where
+            # the hub sits, per network_canvas's own centered layout)
+            # instead of #diagram-scroll's default left-edge start -- a
+            # first look at a wide fan-out trace should show the hub, not
+            # blank space and the leftmost sub-agent box. Scoped to
+            # is_star_hub_topology specifically: a peer diagram has no hub
+            # to center on (centering on its overall midpoint instead just
+            # shows the seam between the two boxes), and the tree view
+            # left-anchors its root rather than centering it, so applying
+            # this there would scroll *away* from the root. `block_width
+            # (topology)` reads the natural width straight off the Text
+            # we're about to render rather than querying the widget's own
+            # (possibly not yet relaid-out) size. Also scoped to non-pulse
+            # refreshes (new spans, trace switches) rather than every
+            # ~1.5s pulse tick, so it doesn't repeatedly yank a user's own
+            # scroll position back to center while they're reading a busy
+            # trace.
+            diagram_total_w = block_width(topology)
+            if is_star_hub_topology and diagram_total_w > available_width:
+                target_x = max(0, (diagram_total_w - available_width) // 2)
+                # Deferred via call_after_refresh: #diagram-scroll's
+                # scrollable bounds (virtual_size/max_scroll_x) are only
+                # recomputed from the new, wider content once Textual
+                # processes the layout triggered by content.update() above
+                # -- calling scroll_to() synchronously here would clamp
+                # target_x against the *previous* (narrower or empty)
+                # bounds and silently no-op.
+                def _center_on_hub(x: int = target_x) -> None:
+                    self.query_one("#diagram-scroll", HorizontalScroll).scroll_to(x=x, animate=False)
+
+                self.call_after_refresh(_center_on_hub)
 
             # Selection is per-agent, not per-trace-dump: nothing selected
             # yet (or the trace changed under it) shows the empty-state
@@ -1634,7 +1725,7 @@ class LiveApp(App):
                 )
             else:
                 inspector_scroll.set_class(True, "inspector-empty")
-                inspector.update(Text(INSPECTOR_EMPTY_HINT, style="dim"))
+                inspector.update(_inspector_logo_text())
 
             trace_list = self.query_one("#trace-list", ListView)
             if self._active_trace_id in self._trace_ids:
