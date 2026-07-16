@@ -164,6 +164,16 @@ def format_event_line(hop: Hop, alias_map: dict[str, str]) -> Text:
     return line
 
 
+def _flash_line(line: Text) -> Text:
+    """A copy of `line` with bold layered on top, for a newly-arrived feed
+    line's one-pulse-cycle flash -- a copy, not an in-place `stylize`, so
+    the original in `LiveApp._events` stays unflashed for later re-renders.
+    """
+    flashed = line.copy()
+    flashed.stylize("bold")
+    return flashed
+
+
 def render_agent_box(label: str, width: int | None = None) -> list[str]:
     content = label
     w = width or max(len(content) + 2, 10)
