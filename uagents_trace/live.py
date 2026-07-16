@@ -10,9 +10,12 @@ from raw spans on its own -- that's what keeps them from disagreeing about
 what happened to a given trace.
 """
 
-from collections import deque
+import time
+from collections import Counter, deque
+from dataclasses import dataclass
 from typing import Any
 
+from rich.style import Style
 from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
@@ -20,6 +23,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, HorizontalScroll, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import Screen
+from textual.timer import Timer
 from textual.widgets import Footer, Header, Label, ListItem, ListView, RichLog, Static
 
 from .brand import BRAND_PANEL_WIDTH, FETCH_BRAND, HERO_BANNER
@@ -27,6 +31,7 @@ from .cli import display_name
 from .network_canvas import (
     ACCENT,
     ERROR,
+    GREEN,
     SUCCESS,
     WARN,
     block_width,
@@ -851,16 +856,19 @@ _FETCH_LOGO_LINES = [line for line in _FETCH_BRAND_LINES[:-1] if line.strip()]
 # width, there is exactly one Static and one render path (`_reveal`) drawing
 # it -- no second, separately appended copy of any row.
 #
-# The hero is rendered in the bright, pre-dim SUCCESS green (the
-# `#4ade80`-family value `wizard.py`'s prompt style still uses) rather than
-# the shared `ACCENT`/`SUCCESS` imported from `network_canvas` above --
-# those two stay dim by design (see `network_canvas.SUCCESS`'s own comment)
-# for the color-economy pass across the rest of the live TUI, and must not
-# be repointed just because the splash wants one bright moment. This
-# constant is used *only* by the splash hero below; the fetch.ai mark next
-# to it keeps rendering in `ACCENT`, unbrightened, so the hero reads as the
-# one bright thing on screen against a calm co-mark.
-SPLASH_HERO_GREEN = "#4ade80"
+# The hero is rendered in this bright green rather than the shared
+# `ACCENT` imported from `network_canvas` above -- that one stays the calm,
+# separate shade (see its own comment) for the handful of spots that still
+# want it, and must not be repointed just because the splash wants one
+# bright moment. The value itself is `network_canvas.GREEN` -- the same
+# constant the diagram/inspector chrome, this file's Header CSS, and (as of
+# the live TUI's full green-unification) `network_canvas.SUCCESS` now all
+# use too -- aliased here under its original name so the splash-specific
+# code below didn't need to change. The fetch.ai mark next to it keeps
+# rendering in `ACCENT`,
+# unbrightened, so the hero reads as the one bright thing on screen against
+# a calm co-mark.
+SPLASH_HERO_GREEN = GREEN
 
 _HERO_LINES = HERO_BANNER.strip("\n").split("\n")
 _HERO_WIDTH = max(len(line) for line in _HERO_LINES)
@@ -1186,7 +1194,10 @@ class LiveApp(App):
     }
     Header {
         background: #111916;
-        color: #34d399;
+        /* Matches SPLASH_HERO_GREEN/network_canvas.GREEN -- hardcoded
+           rather than interpolated because this whole CSS block is a plain
+           (not f-) string, same as Screen's #0a0f0d == SPLASH_BG above. */
+        color: #4ade80;
     }
     Footer {
         background: #111916;
