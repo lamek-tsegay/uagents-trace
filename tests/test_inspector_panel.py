@@ -252,7 +252,10 @@ class InspectorClickToRevealTests(unittest.TestCase):
                 await _boot(pilot)
 
                 plain = self._inspector_plain(app)
-                self.assertEqual(plain, INSPECTOR_EMPTY_HINT)
+                # The empty state is now the brand logo with the hint
+                # underneath, not the bare hint string on its own.
+                self.assertIn(INSPECTOR_EMPTY_HINT, plain)
+                self.assertNotEqual(plain, INSPECTOR_EMPTY_HINT)
                 # No agent, hop, or leg detail (payloads, protocol, timing)
                 # should have leaked into the default view.
                 self.assertNotIn("protocol", plain)
@@ -347,7 +350,9 @@ class InspectorClickToRevealTests(unittest.TestCase):
                 await app._select_trace("trace-b", follow=False)
                 await app._refresh_display()
 
-                self.assertEqual(self._inspector_plain(app), INSPECTOR_EMPTY_HINT)
+                plain = self._inspector_plain(app)
+                self.assertIn(INSPECTOR_EMPTY_HINT, plain)
+                self.assertNotIn("SubAgent1", plain)
 
         asyncio.run(run())
 

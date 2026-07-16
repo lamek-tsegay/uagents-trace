@@ -480,24 +480,94 @@ def _relative_ms(t: int, started_at: int) -> int:
     return max(t - started_at, 0)
 
 
-def _timing_line(label: str, span: dict[str, Any] | None, started_at: int) -> Text | None:
-    """One "enqueued -> acked" line for a single span, relative to trace
-    start -- the per-phase breakdown the leg/route table's rolled-up Total
-    column doesn't show.
-    """
-    if span is None:
-        return None
-    enq_rel = _relative_ms(span["enqueued_at"], started_at)
-    acked_at = span.get("acked_at")
-    if acked_at is None:
-        return Text(f"    {label:<8} +{enq_rel}ms → …", style=MUTED)
-    ack_rel = _relative_ms(acked_at, started_at)
-    delta = max(acked_at - span["enqueued_at"], 0)
-    return Text(f"    {label:<8} +{enq_rel}ms → +{ack_rel}ms   (Δ{delta}ms)", style=MUTED)
-
-
 _LEG_ICON = {"completed": STATE_ICON["delivered"], "failed": STATE_ICON["dropped"], "pending": STATE_ICON["pending"]}
 _LEG_STYLE = {"completed": SUCCESS, "failed": ERROR, "pending": WARN}
+
+# Section header color -- the calm, always-on brand accent (not
+# SPLASH_HERO_GREEN, which the splash's own comment reserves for its
+# one-time bright flash, not a persistent panel).
+_SECTION_STYLE = f"bold {ACCENT}"
+_SECTION_LABEL_WIDTH = 15
+
+
+def _format_bytes(n: int | None) -> str:
+    if n is None:
+        return "—"
+    if n < 1024:
+        return f"{n} B"
+    return f"{n / 1024:.1f} KB"
+
+
+def _message_section(payload_label: str, protocol: str | None) -> Text:
+    """Message section: what was sent and over which protocol."""
+    block = Text()
+    block.append("Message\n", style=_SECTION_STYLE)
+    if payload_label:
+        block.append(f"  {payload_label}\n", style=MUTED)
+    block.append(f"  protocol: {protocol or '—'}\n", style=MUTED)
+    return block
+
+
+def _timing_section(rows: list[tuple[str, int | None, int | None, int | None]]) -> Text:
+    """Aligned mini-table, one row per phase: (label, start_rel_ms,
+    end_rel_ms, delta_ms). A row with no start/end (just a delta) renders
+    as a plain summary row -- e.g. "total" -- instead of a dangling arrow
+    to nowhere.
+    """
+    block = Text()
+    block.append("Timing\n", style=_SECTION_STYLE)
+    col_label, col_time = 9, 9
+    for label, start_rel, end_rel, delta in rows:
+        delta_s = f"Δ{delta}ms" if delta is not None else ""
+        if start_rel is None and end_rel is None:
+            line = f"  {label:<{col_label}}{'':<{col_time}}  {'':<{col_time}}{delta_s:>8}\n"
+        else:
+            start_s = f"+{start_rel}ms" if start_rel is not None else ""
+            end_s = f"+{end_rel}ms" if end_rel is not None else "…"
+            line = f"  {label:<{col_label}}{start_s:<{col_time}}→ {end_s:<{col_time}}{delta_s:>8}\n"
+        block.append(line, style=MUTED)
+    return block
+
+
+def _registration_row(label: str, registered: bool | None) -> Text:
+    """✓/✗ network-registration indicator -- usually the actual reason a
+    message never arrived, so a False here is styled as a warning, not
+    just more muted status text.
+    """
+    prefix = f"  {label:<{_SECTION_LABEL_WIDTH}}"
+    if registered is None:
+        return Text(f"{prefix}—\n", style=MUTED)
+    if registered:
+        return Text(f"{prefix}✓ registered\n", style=MUTED)
+    return Text(f"{prefix}✗ not registered\n", style=f"bold {WARN}")
+
+
+def _delivery_section(
+    payload_size: int | None,
+    source_label: str,
+    source_registered: bool | None,
+    dest_label: str,
+    dest_registered: bool | None,
+) -> Text:
+    """Delivery section: the "why didn't my agent receive this" signals --
+    payload size and whether each side was actually registered on the
+    network at send time.
+    """
+    block = Text()
+    block.append("Delivery\n", style=_SECTION_STYLE)
+    block.append(f"  {'payload size':<{_SECTION_LABEL_WIDTH}}{_format_bytes(payload_size)}\n", style=MUTED)
+    block.append_text(_registration_row(source_label, source_registered))
+    block.append_text(_registration_row(dest_label, dest_registered))
+    return block
+
+
+def _error_section(reason: str, when_rel: int | None) -> Text:
+    block = Text()
+    block.append("Error\n", style=f"bold {ERROR}")
+    block.append(f"  {reason}\n", style=f"bold {ERROR}")
+    if when_rel is not None:
+        block.append(f"  at +{when_rel}ms\n", style=ERROR)
+    return block
 
 
 def _hub_leg_detail(
@@ -507,12 +577,14 @@ def _hub_leg_detail(
     started_at: int,
     alias_map: dict[str, str],
 ) -> Text:
-    """Full detail block for one hub leg: payload, protocol, raw error, and
-    an enqueued->acked breakdown per phase (dispatch, reply) rather than
-    just the leg table's rolled-up Total.
+    """Full, sectioned detail for one hub leg: Message, Timing, Delivery,
+    and (if failed) Error. `spans` supplies protocol, exact timestamps, and
+    the delivery fields (payload size, registration) that `leg` itself
+    doesn't carry -- see `_find_span`.
     """
     subagent = leg["subagent"]
     name = display_name(subagent, alias_map)
+    hub_name = display_name(hub, alias_map)
     state = leg.get("state", "pending")
     style = _LEG_STYLE.get(state, WARN)
     icon = _LEG_ICON.get(state, "·")
@@ -521,40 +593,60 @@ def _hub_leg_detail(
     reply = _find_span(spans, subagent, hub, "send")
 
     block = Text()
-    block.append(f"{icon} {name}\n", style=f"bold {style}")
+    block.append(f"{icon} {name}\n\n", style=f"bold {style}")
 
     ptype = leg.get("dispatch_payload")
     payload = leg.get("dispatch_message")
-    label = f'{ptype}: "{payload}"' if payload else (ptype or "")
-    if label:
-        block.append(f"  {label}\n", style=MUTED)
-
+    payload_label = f'{ptype}: "{payload}"' if payload else (ptype or "")
     protocol = dispatch.get("protocol") if dispatch else None
-    block.append(f"  protocol: {protocol or '—'}\n", style=MUTED)
+    block.append_text(_message_section(payload_label, protocol))
+    block.append("\n")
 
-    dispatch_line = _timing_line("dispatch", dispatch, started_at)
-    if dispatch_line is not None:
-        block.append_text(dispatch_line)
+    rows: list[tuple[str, int | None, int | None, int | None]] = []
+    dispatch_end_rel: int | None = None
+    if dispatch is not None:
+        dispatch_start_rel = _relative_ms(dispatch["enqueued_at"], started_at)
+        dispatch_acked = dispatch.get("acked_at")
+        dispatch_delta = max(dispatch_acked - dispatch["enqueued_at"], 0) if dispatch_acked is not None else None
+        if dispatch_acked is not None:
+            dispatch_end_rel = _relative_ms(dispatch_acked, started_at)
+        rows.append(("dispatch", dispatch_start_rel, dispatch_end_rel, dispatch_delta))
+    if state == "completed" and reply is not None:
+        reply_start_rel = _relative_ms(reply["enqueued_at"], started_at)
+        reply_acked = reply.get("acked_at")
+        reply_end_rel = _relative_ms(reply_acked, started_at) if reply_acked is not None else None
+        reply_delta = max(reply_acked - reply["enqueued_at"], 0) if reply_acked is not None else None
+        rows.append(("reply", reply_start_rel, reply_end_rel, reply_delta))
+        rows.append(("total", None, None, leg.get("latency_ms")))
+    if rows:
+        block.append_text(_timing_section(rows))
         block.append("\n")
 
-    if state == "completed":
-        reply_line = _timing_line("reply", reply, started_at)
-        if reply_line is not None:
-            block.append_text(reply_line)
-            block.append("\n")
-        block.append(f"    {'total':<8} Δ{leg.get('latency_ms')}ms\n", style=style)
-    elif state == "failed":
+    block.append_text(
+        _delivery_section(
+            dispatch.get("payload_size") if dispatch else None,
+            hub_name,
+            dispatch.get("source_registered") if dispatch else None,
+            name,
+            dispatch.get("dest_registered") if dispatch else None,
+        )
+    )
+
+    if state == "failed":
+        block.append("\n")
         reason = leg.get("reason") or "(no error message)"
-        block.append(f"  error: {reason}\n", style=f"bold {ERROR}")
-    else:
-        block.append("  waiting for reply…\n", style=WARN)
+        block.append_text(_error_section(reason, dispatch_end_rel))
+    elif state == "pending":
+        block.append("\n  waiting for reply…\n", style=WARN)
 
     return block
 
 
-def _peer_hop_detail(hop: Hop, started_at: int, alias_map: dict[str, str]) -> Text:
-    """Full detail block for one peer hop -- mirrors `_hub_leg_detail` but
-    reads straight off the already-deduplicated `Hop`.
+def _peer_hop_detail(hop: Hop, spans: list[dict[str, Any]], started_at: int, alias_map: dict[str, str]) -> Text:
+    """Full, sectioned detail for one peer hop -- mirrors `_hub_leg_detail`
+    but reads straight off the already-deduplicated `Hop`, except for
+    payload size, which `Hop` doesn't carry -- that one field still needs
+    a raw-span lookup (`_find_span`), same as the hub path.
     """
     src = display_name(hop.source, alias_map)
     dst = display_name(hop.dest, alias_map)
@@ -563,25 +655,57 @@ def _peer_hop_detail(hop: Hop, started_at: int, alias_map: dict[str, str]) -> Te
     icon = STATE_ICON.get(state, "·")
 
     block = Text()
-    block.append(f"{icon} {src} → {dst}\n", style=f"bold {style}")
-    block.append(f"  {_format_payload(hop)}\n", style=MUTED)
-    block.append(f"  protocol: {hop.protocol or '—'}\n", style=MUTED)
+    block.append(f"{icon} {src} → {dst}\n\n", style=f"bold {style}")
+
+    block.append_text(_message_section(_format_payload(hop), hop.protocol))
+    block.append("\n")
 
     enq_rel = _relative_ms(hop.enqueued_at, started_at)
-    if hop.acked_at is None:
-        block.append(f"    +{enq_rel}ms → …\n", style=style)
-    else:
-        ack_rel = _relative_ms(hop.acked_at, started_at)
-        block.append(f"    +{enq_rel}ms → +{ack_rel}ms   (Δ{hop.latency_ms}ms)\n", style=style)
+    ack_rel = _relative_ms(hop.acked_at, started_at) if hop.acked_at is not None else None
+    block.append_text(_timing_section([("hop", enq_rel, ack_rel, hop.latency_ms)]))
+    block.append("\n")
+
+    raw = _find_span(spans, hop.source, hop.dest, "send")
+    block.append_text(
+        _delivery_section(
+            raw.get("payload_size") if raw else None,
+            src,
+            hop.source_registered,
+            dst,
+            hop.dest_registered,
+        )
+    )
 
     if state in ("dropped", "timeout"):
+        block.append("\n")
         reason = hop.error or "(no error message)"
-        block.append(f"  error: {reason}\n", style=f"bold {ERROR}")
+        block.append_text(_error_section(reason, ack_rel if ack_rel is not None else enq_rel))
 
     return block
 
 
 INSPECTOR_EMPTY_HINT = "click an agent for details"
+
+
+def _inspector_logo_text() -> Text:
+    """Compact empty-state brand mark -- just the hero wordmark from
+    `brand.HERO_BANNER` (61 cols), reusing the exact same pre-rendered rows
+    the splash's stacked tier is built from (`_HERO_LINES_PADDED`) rather
+    than inventing new art. The splash's full co-branded lockup (hero +
+    fetch.ai mark) measures 72-78 cols depending on tier -- wider than
+    `#inspector-col`'s ~70-col usable width -- so this is hero-only, the
+    smaller of the two marks already in `brand.py`. Styled in the calm
+    `ACCENT` green (not `SPLASH_HERO_GREEN`, reserved for the splash's
+    one-time flash) since this sits on screen persistently.
+    """
+    text = Text(justify="center")
+    for i, line in enumerate(_HERO_LINES_PADDED):
+        if i:
+            text.append("\n")
+        text.append(line, style=f"bold {ACCENT}")
+    text.append("\n\n")
+    text.append(INSPECTOR_EMPTY_HINT, style="dim")
+    return text
 
 
 def build_agent_inspector_text(
@@ -591,10 +715,9 @@ def build_agent_inspector_text(
     spans: list[dict[str, Any]],
     alias_map: dict[str, str],
 ) -> Text:
-    """Deep detail for exactly one clicked agent -- full payload, protocol,
-    dispatch->reply->total timing, and raw error text. Nothing else from
-    the trace leaks in here; that's the point of click-to-reveal instead
-    of dumping every agent's detail into the panel at once.
+    """Deep, sectioned detail for exactly one clicked agent. Nothing else
+    from the trace leaks in here; that's the point of click-to-reveal
+    instead of dumping every agent's detail into the panel at once.
     """
     text = Text()
     text.append(f"Session  {trace_id}\n\n", style=MUTED)
@@ -612,13 +735,31 @@ def build_agent_inspector_text(
         text.append("No detail for this agent in the current trace.", style="dim")
         return text
     if agent == outbound.source:
-        text.append_text(_peer_hop_detail(outbound, state.started_at, alias_map))
+        text.append_text(_peer_hop_detail(outbound, spans, state.started_at, alias_map))
     elif reply is not None and agent == outbound.dest:
-        text.append_text(_peer_hop_detail(reply, state.started_at, alias_map))
+        text.append_text(_peer_hop_detail(reply, spans, state.started_at, alias_map))
     elif agent == outbound.dest:
+        # Outbound sent, no reply yet -- still show what we know about the
+        # outbound leg (message/timing/delivery) rather than nothing.
         name = display_name(agent, alias_map)
-        text.append(f"{name}\n", style=f"bold {WARN}")
-        text.append("  waiting for reply…", style=WARN)
+        src_name = display_name(outbound.source, alias_map)
+        text.append(f"… {name}\n\n", style=f"bold {WARN}")
+        text.append_text(_message_section(_format_payload(outbound), outbound.protocol))
+        text.append("\n")
+        enq_rel = _relative_ms(outbound.enqueued_at, state.started_at)
+        text.append_text(_timing_section([("sent", enq_rel, None, None)]))
+        text.append("\n")
+        raw = _find_span(spans, outbound.source, outbound.dest, "send")
+        text.append_text(
+            _delivery_section(
+                raw.get("payload_size") if raw else None,
+                src_name,
+                outbound.source_registered,
+                name,
+                outbound.dest_registered,
+            )
+        )
+        text.append("\n  waiting for reply…", style=WARN)
     else:
         text.append("No detail for this agent in the current trace.", style="dim")
     return text
