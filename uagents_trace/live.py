@@ -369,9 +369,12 @@ def _sub_title_for(setup: WatchSetup, view_mode: ViewMode, *, follow: bool) -> s
     """Status line -- a static usage hint (real keybindings a new user
     wouldn't otherwise discover), not a restatement of current state. The
     sidebar and diagram already show which trace is active and how; this
-    line doesn't need to repeat that.
+    line doesn't need to repeat that. No product name here -- the user
+    already knows what app they're in (the splash said so); `App.title`
+    (see `on_mount`) is kept short for the same reason, so the composed
+    Header line (`title — sub_title`) doesn't restate it twice either.
     """
-    return "f follow latest  ·  click a trace to pin  ·  v tree view"
+    return "to follow latest trace: press f  ·  to pin a trace: click it  ·  to switch to tree diagram: press v"
 
 
 def _trace_matches_watch(trace: dict[str, Any], addresses: set[str] | None) -> bool:
@@ -1402,11 +1405,16 @@ class LiveApp(App):
         # one below it), so none of the calls after this need to change.
         await self.push_screen(SplashScreen())
 
-        self.title = "trace-uagents live"
+        # Not "trace-uagents live" -- the splash screen (just dismissed)
+        # already established the app's identity; naming it again here
+        # would restate it a third time once combined with the sub-title
+        # hint below (Header renders "{title} — {sub_title}" on one line).
+        self.title = "live"
         self.sub_title = _sub_title_for(self.setup, self.view_mode, follow=self._follow_latest)
         events_log = self.query_one("#events-panel", RichLog)
         events_log.write(Text("  Waiting for message flow…", style="#6b7280"))
         self._apply_inspector_visibility(self.size.width)
+        self._apply_events_panel_height(self.size.height)
         await self._bootstrap()
         self.set_interval(POLL_SECONDS, self._poll)
         self.set_interval(PULSE_SECONDS, self._pulse_tick)
