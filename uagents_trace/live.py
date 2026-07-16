@@ -697,24 +697,50 @@ def _format_bytes(n: int | None) -> str:
     return f"{n / 1024:.1f} KB"
 
 
-def _message_section(payload_label: str, protocol: str | None) -> Text:
-    """Message section: what was sent and over which protocol."""
+def _message_section(payload_label: str, protocol: str | None, detail: str | None = None) -> Text:
+    """Message section: what was sent, over which protocol, and (only when
+    present -- most messages don't have one) any protocol-specific detail
+    a recognized protocol attaches, e.g. Payment protocol's amount or a
+    rejection reason (see `protocols.classify_message`). `detail` already
+    exists on every span/Hop but used to be genuinely invisible for a hub
+    leg's payload label, and only a silent fallback for a peer hop's
+    (dropped entirely whenever `payload_summary` was also set) -- shown
+    explicitly here instead so it's never hidden behind the summary text.
+    """
     block = Text()
     block.append("Message\n", style=_SECTION_STYLE)
     if payload_label:
         block.append(f"  {payload_label}\n", style=MUTED)
     block.append(f"  protocol: {protocol or '—'}\n", style=MUTED)
+    if detail:
+        block.append(f"  detail: {detail}\n", style=MUTED)
     return block
 
 
-def _timing_section(rows: list[tuple[str, int | None, int | None, int | None]]) -> Text:
+def _format_clock(ms: int) -> str:
+    """Local wall-clock HH:MM:SS.mmm for an epoch-ms timestamp -- an
+    anchor point for cross-referencing against an agent's own stdout logs,
+    which print wall-clock time, not this panel's trace-relative deltas.
+    """
+    millis = ms % 1000
+    return f"{time.strftime('%H:%M:%S', time.localtime(ms / 1000))}.{millis:03d}"
+
+
+def _timing_section(
+    rows: list[tuple[str, int | None, int | None, int | None]], *, sent_at_ms: int | None = None
+) -> Text:
     """Aligned mini-table, one row per phase: (label, start_rel_ms,
     end_rel_ms, delta_ms). A row with no start/end (just a delta) renders
     as a plain summary row -- e.g. "total" -- instead of a dangling arrow
-    to nowhere.
+    to nowhere. `sent_at_ms`, if given, prints one absolute wall-clock
+    line above the table -- once, not per row, since the relative deltas
+    already tell the within-trace story and repeating an absolute
+    timestamp on every row would just be noise.
     """
     block = Text()
     block.append("Timing\n", style=_SECTION_STYLE)
+    if sent_at_ms is not None:
+        block.append(f"  sent at {_format_clock(sent_at_ms)}\n", style=MUTED)
     col_label, col_time = 9, 9
     for label, start_rel, end_rel, delta in rows:
         delta_s = f"Δ{delta}ms" if delta is not None else ""
@@ -725,6 +751,24 @@ def _timing_section(rows: list[tuple[str, int | None, int | None, int | None]]) 
             end_s = f"+{end_rel}ms" if end_rel is not None else "…"
             line = f"  {label:<{col_label}}{start_s:<{col_time}}→ {end_s:<{col_time}}{delta_s:>8}\n"
         block.append(line, style=MUTED)
+    return block
+
+
+def _address_section(pairs: list[tuple[str, str]]) -> Text:
+    """Full, untruncated agent addresses -- mirrors `_delivery_section`'s
+    two-row, label-aligned shape (same labels: hub/subagent or src/dst),
+    just addresses instead of registration status. Every name shown
+    elsewhere in this panel goes through `display_name()`, which returns
+    an alias if one's set (hiding the real address entirely) or a
+    truncated `first10…last4` form otherwise -- there was previously no
+    way to see an agent's actual address in the inspector at all once it
+    had a friendly name, which matters for cross-referencing Agentverse
+    or any other tool that wants the real thing.
+    """
+    block = Text()
+    block.append("Address\n", style=_SECTION_STYLE)
+    for label, address in pairs:
+        block.append(f"  {label:<{_SECTION_LABEL_WIDTH}}{address}\n", style=MUTED)
     return block
 
 
@@ -794,11 +838,15 @@ def _hub_leg_detail(
     block = Text()
     block.append(f"{icon} {name}\n\n", style=f"bold {style}")
 
+    block.append_text(_address_section([(hub_name, hub), (name, subagent)]))
+    block.append("\n")
+
     ptype = leg.get("dispatch_payload")
     payload = leg.get("dispatch_message")
     payload_label = f'{ptype}: "{payload}"' if payload else (ptype or "")
     protocol = dispatch.get("protocol") if dispatch else None
-    block.append_text(_message_section(payload_label, protocol))
+    detail = dispatch.get("detail") if dispatch else None
+    block.append_text(_message_section(payload_label, protocol, detail))
     block.append("\n")
 
     rows: list[tuple[str, int | None, int | None, int | None]] = []
@@ -818,7 +866,7 @@ def _hub_leg_detail(
         rows.append(("reply", reply_start_rel, reply_end_rel, reply_delta))
         rows.append(("total", None, None, leg.get("latency_ms")))
     if rows:
-        block.append_text(_timing_section(rows))
+        block.append_text(_timing_section(rows, sent_at_ms=dispatch["enqueued_at"] if dispatch else None))
         block.append("\n")
 
     block.append_text(
@@ -856,12 +904,15 @@ def _peer_hop_detail(hop: Hop, spans: list[dict[str, Any]], started_at: int, ali
     block = Text()
     block.append(f"{icon} {src} → {dst}\n\n", style=f"bold {style}")
 
-    block.append_text(_message_section(_format_payload(hop), hop.protocol))
+    block.append_text(_address_section([(src, hop.source), (dst, hop.dest)]))
+    block.append("\n")
+
+    block.append_text(_message_section(_format_payload(hop), hop.protocol, hop.detail))
     block.append("\n")
 
     enq_rel = _relative_ms(hop.enqueued_at, started_at)
     ack_rel = _relative_ms(hop.acked_at, started_at) if hop.acked_at is not None else None
-    block.append_text(_timing_section([("hop", enq_rel, ack_rel, hop.latency_ms)]))
+    block.append_text(_timing_section([("hop", enq_rel, ack_rel, hop.latency_ms)], sent_at_ms=hop.enqueued_at))
     block.append("\n")
 
     raw = _find_span(spans, hop.source, hop.dest, "send")
