@@ -1828,6 +1828,21 @@ class LiveApp(App):
         # changes, since a selection from a different trace's agents
         # wouldn't mean anything here.
         self._selected_agent: str | None = None
+        # Monotonically increasing, driven by _shimmer_tick -- the
+        # empty-state logo shimmer's clock (see _shimmer_logo_text).
+        # Deliberately not reset; it only ever needs to keep advancing.
+        self._shimmer_tick_count = 0
+        # The shimmer's own dedicated timer handle (see
+        # _start_shimmer_timer/_stop_shimmer_timer) -- None whenever it
+        # isn't currently running, which is the signal both methods use to
+        # stay idempotent (starting an already-running timer, or stopping
+        # an already-stopped one, is a safe no-op either way).
+        self._shimmer_timer: Timer | None = None
+        # >0 while the star-link celebration flash is playing; sees a few
+        # shimmer ticks (see CELEBRATION_TICKS) then counts back down to 0,
+        # at which point the star link reverts to its normal look. Set by
+        # on_inspector_canvas_star_link_clicked.
+        self._celebration_ticks = 0
 
     def _hub_hint(self) -> str | None:
         """Force hub-style rendering once the wizard has told us who the
@@ -1927,6 +1942,35 @@ class LiveApp(App):
             self._flash_active = False
             self._render_events_log(flash=False)
         await self._refresh_display(pulse_only=True)
+
+    def _start_shimmer_timer(self) -> None:
+        """Starts the empty-state logo shimmer's own fast clock -- a no-op
+        if it's already running (see `_shimmer_timer`'s own comment).
+        Called every time the empty state renders (`_render_inspector_
+        empty_state`), which only ever happens while `_selected_agent is
+        None`, so this only ever runs during the empty state.
+        """
+        if self._shimmer_timer is None:
+            self._shimmer_timer = self.set_interval(SHIMMER_INTERVAL_SECONDS, self._shimmer_tick)
+
+    def _stop_shimmer_timer(self) -> None:
+        """Stops the shimmer clock -- called the moment an agent is
+        selected (`on_diagram_canvas_agent_clicked`), so it doesn't keep
+        ticking (and re-rendering the inspector 6-7x/second for nothing)
+        while a wholly different, non-animated view is showing.
+        """
+        if self._shimmer_timer is not None:
+            self._shimmer_timer.stop()
+            self._shimmer_timer = None
+
+    def _shimmer_tick(self) -> None:
+        self._shimmer_tick_count += 1
+        self._render_inspector_empty_state()
+        if self._celebration_ticks > 0:
+            # Decremented *after* the render above, so the frame just
+            # drawn (at whatever count was left) is CELEBRATION_TICKS'
+            # worth of real frames, not one fewer.
+            self._celebration_ticks -= 1
 
     async def _bootstrap(self) -> None:
         self._alias_map = await get_alias_map(self.db_path)
@@ -2062,6 +2106,11 @@ class LiveApp(App):
 
     async def on_diagram_canvas_agent_clicked(self, message: DiagramCanvas.AgentClicked) -> None:
         self._selected_agent = message.agent
+        # Leaving the empty state -- nothing in the agent-detail view the
+        # shimmer timer would be animating, so stop it rather than let it
+        # keep ticking (and re-rendering the inspector 6-7x/second) for no
+        # visible effect.
+        self._stop_shimmer_timer()
         await self._refresh_display()
 
     async def action_toggle_follow(self) -> None:
@@ -2139,9 +2188,50 @@ class LiveApp(App):
         # instead of sitting at a small fixed size inside it.
         return max(col.size.height - 2, 0)
 
+    def _inspector_panel_height(self) -> int:
+        scroll = self.query_one("#inspector-scroll")
+        # Inner height: subtract border (1+1) and vertical padding (1+1) --
+        # #inspector-scroll's CSS has both. Fed to _build_empty_state_text
+        # as available_height so it knows how many of the Session/Timing/
+        # Failures stat blocks actually fit before dropping from the
+        # bottom -- see that function's own docstring.
+        return max(scroll.size.height - 4, 0)
+
+    def _render_inspector_empty_state(self) -> None:
+        """(Re)draws the inspector's empty-state content -- logo shimmer,
+        session stats, star link, and (localized to just the star link's
+        own line, see `_star_link_text`) any in-progress click-celebration
+        flash. Called from every `_refresh_display` branch where
+        `_selected_agent` is `None`, plus every shimmer tick, so the logo
+        keeps animating; never called while an agent IS selected, since
+        nothing in that view is time-driven. Also where the shimmer's own
+        timer gets (re)started -- see `_start_shimmer_timer`'s own
+        docstring for why that's safe to call unconditionally here.
+        """
+        self._start_shimmer_timer()
+
+        inspector = self.query_one("#inspector-content", InspectorCanvas)
+        inspector_scroll = self.query_one("#inspector-scroll", VerticalScroll)
+        inspector_scroll.set_class(True, "inspector-empty")
+
+        celebration_frame = CELEBRATION_TICKS - self._celebration_ticks if self._celebration_ticks > 0 else None
+        stats = _compute_session_stats(list(self._trace_rollup_cache.values()))
+        text, star_link_rows = _build_empty_state_text(
+            stats,
+            tick=self._shimmer_tick_count,
+            available_height=self._inspector_panel_height(),
+            celebration_frame=celebration_frame,
+        )
+        inspector.update(text)
+        inspector.star_link_rows = star_link_rows
+
+    def on_inspector_canvas_star_link_clicked(self, message: InspectorCanvas.StarLinkClicked) -> None:
+        self._celebration_ticks = CELEBRATION_TICKS
+        self._render_inspector_empty_state()
+
     async def _refresh_display(self, *, pulse_only: bool = False) -> None:
         content = self.query_one("#diagram-content", DiagramCanvas)
-        inspector = self.query_one("#inspector-content", Static)
+        inspector = self.query_one("#inspector-content", InspectorCanvas)
         inspector_scroll = self.query_one("#inspector-scroll", VerticalScroll)
 
         if not self._active_trace_id:
@@ -2155,8 +2245,12 @@ class LiveApp(App):
                     )
                 )
                 content.hit_regions = {}
-                inspector_scroll.set_class(True, "inspector-empty")
-                inspector.update(_inspector_logo_text())
+            # Unconditional (not `if not pulse_only`) -- this is also what
+            # kicks off the shimmer's own timer (see _start_shimmer_timer)
+            # the first time the empty state ever renders, before any
+            # trace has arrived at all; from then on the shimmer keeps
+            # itself animating independently of pulse_only.
+            self._render_inspector_empty_state()
             return
 
         spans = await get_trace_spans(self.db_path, self._active_trace_id)
@@ -2240,20 +2334,36 @@ class LiveApp(App):
 
                 self.call_after_refresh(_center_on_hub)
 
-            # Selection is per-agent, not per-trace-dump: nothing selected
-            # yet (or the trace changed under it) shows the empty-state
-            # hint; a click shows that one agent's detail and nothing else.
-            if self._selected_agent is not None:
+        # Selection is per-agent, not per-trace-dump: nothing selected yet
+        # (or the trace changed under it) shows the empty state; a click
+        # shows that one agent's detail and nothing else. The empty-state
+        # branch runs on every refresh, pulse_only included -- besides
+        # keeping stats current, this is what (re)starts the shimmer's own
+        # timer on entering the empty state. The selected-agent branch only
+        # rebuilds on a real refresh and explicitly stops that timer (see
+        # on_diagram_canvas_agent_clicked); nothing in an agent's detail is
+        # time-driven, so it's skipped entirely on a pulse-only tick rather
+        # than rebuilding the same text for no reason.
+        if self._selected_agent is not None:
+            if not pulse_only:
+                inspector.star_link_rows = None
                 inspector_scroll.set_class(False, "inspector-empty")
+                session_stats = _compute_session_stats(list(self._trace_rollup_cache.values()))
                 inspector.update(
                     build_agent_inspector_text(
-                        self._selected_agent, self._active_trace_id, state, spans, self._alias_map
+                        self._selected_agent,
+                        self._active_trace_id,
+                        state,
+                        spans,
+                        self._alias_map,
+                        session_stats=session_stats,
+                        available_height=self._inspector_panel_height(),
                     )
                 )
-            else:
-                inspector_scroll.set_class(True, "inspector-empty")
-                inspector.update(_inspector_logo_text())
+        else:
+            self._render_inspector_empty_state()
 
+        if not pulse_only:
             trace_list = self.query_one("#trace-list", ListView)
             if self._active_trace_id in self._trace_ids:
                 trace_list.index = self._trace_ids.index(self._active_trace_id)
