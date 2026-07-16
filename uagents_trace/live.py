@@ -428,14 +428,35 @@ FAILURE_MARKER = "⚑ "
 DEGRADED_MARKER = "⚠ "
 MARKER_WIDTH = 2
 
+# Per-trace index shown at the start of each row (see `LiveApp._trace_seq`
+# for how it's assigned/kept stable). Cyan/blue rather than any of
+# green/amber/red/MUTED -- it isn't a status, it's a position in "the order
+# traces arrived", and using a status color for it would read as a fifth
+# outcome that doesn't exist. Bold, unlike the id next to it, so it carries
+# more visual weight despite being the same character height (a terminal
+# can't do font-size).
+INDEX_COLOR = "#38bdf8"
+ID_DISPLAY_WIDTH = 6
+NUMBER_WIDTH = 3  # right-justified -- fits 1-999 without the id column drifting
+# Column where line 1's header text starts: the number field, a 2-space
+# gap, the id, " · ", then the (always-reserved, see MARKER_WIDTH above)
+# marker column. Line 2's fraction is indented to this same column (see
+# sidebar_label) so it lands directly under the header on every row,
+# regardless of marker presence or how many digits the row's number has.
+_SIDEBAR_HEADER_COL = NUMBER_WIDTH + 2 + ID_DISPLAY_WIDTH + 3 + MARKER_WIDTH
+
 
 def _latency_bar(duration_ms: int) -> str:
     """Small inline bar for a trace's duration, scanned at a glance instead
     of having to read the raw ms/s number -- the number stays alongside it
     (see `sidebar_label`) so the exact value is still there when it matters.
-    Its scale (LATENCY_BAR_SCALE_MS) isn't self-evident from the bar alone;
-    surfaced once via `#trace-list`'s border_title rather than repeated on
-    every row (see `LiveApp.compose`).
+    Its scale (LATENCY_BAR_SCALE_MS) isn't self-evident from the bar alone
+    and, unlike an earlier version of this docstring claimed, isn't
+    surfaced anywhere in the UI either -- `#trace-list`'s border_title (see
+    `LiveApp.compose`) spends its one line on the bar's *color* meaning
+    (speed, via `_latency_bar_style`) instead, since that reads at a glance
+    and the exact scale mostly doesn't matter once the bar and its color
+    already say "fast" or "slow".
     """
     if duration_ms <= 0:
         return LATENCY_BAR_EMPTY * LATENCY_BAR_WIDTH
@@ -444,30 +465,61 @@ def _latency_bar(duration_ms: int) -> str:
     return LATENCY_BAR_FILLED * filled + LATENCY_BAR_EMPTY * (LATENCY_BAR_WIDTH - filled)
 
 
-def sidebar_label(trace_id: str, state: TraceState, alias_map: dict[str, str]) -> tuple[Text, str]:
+def _latency_bar_style(bar: str) -> str:
+    """Bar color encodes speed by fill level -- a completely different axis
+    from the row's own outcome color, which is what `style` (success/
+    failed/partial) means everywhere else in this row. Reuses the same
+    green/amber/red hues rather than inventing new ones, but a fast,
+    failed trace still shows a green bar next to red failure text, and a
+    slow success shows a red bar next to green text -- the two colors are
+    independent by design, not a second encoding of the same thing.
+    """
+    filled = bar.count(LATENCY_BAR_FILLED)
+    if filled <= 2:
+        return GREEN
+    if filled <= 4:
+        return WARN
+    return ERROR
+
+
+def sidebar_label(
+    trace_id: str, state: TraceState, alias_map: dict[str, str], number: int | None = None
+) -> tuple[Text, str]:
     """(text, style) for one two-line sidebar row -- a fractional rollup,
     not a binary all-or-nothing ✓/✗, so a hub trace that's 3/4 done doesn't
     read as a total failure just because one leg is still broken.
 
-        line 1 (identity, scanned to find a trace): "{id} · {marker}{header}"
-        line 2 (status, indented):                   "  {done}/{total} ✓  {bar} {duration}"
+        line 1 (identity, scanned to find a trace): "{number}  {id} · {marker}{header}"
+        line 2 (status, aligned under the header):   "{indent}{done}/{total} ✓  {bar} {duration}"
+
+    `number` is the trace's stable, oldest-first index (see
+    `LiveApp._trace_seq`) -- `None` renders as blank padding rather than
+    omitting the field, so the header still lands at the same column
+    (`_SIDEBAR_HEADER_COL`) whether or not a caller has one to show (e.g. a
+    test that doesn't care about numbering).
 
     Color is fractional too: red is reserved for a trace where *every*
     leg failed. A trace with some legs ok and some failed (or still
     pending) reads amber -- "needs a look", not "everything is broken".
     Only a fully clean trace (nothing failed or pending) reads green. The
     trace id on line 1 always stays neutral/dim regardless of outcome;
-    only the header and all of line 2 carry the semantic color, bold only
-    for a fully-failed trace (style == ERROR) -- everything else,
-    including a fully-delivered trace, recedes at normal weight.
+    only the header and all of line 2's fraction carry the semantic color,
+    bold only for a fully-failed trace (style == ERROR) -- everything
+    else, including a fully-delivered trace, recedes at normal weight. The
+    latency bar on line 2 carries its *own*, independent color (see
+    `_latency_bar_style`) -- speed, not outcome.
 
     A trace with *any* failed leg always carries a marker (⚑ if every leg
     failed, ⚠ if only some did) so it stands out from a scan of the list
     without having to read the x/y fraction -- a partially-failed trace
     must never look like a plain in-progress one.
     """
+    number_field = f"{number:>{NUMBER_WIDTH}}" if number is not None else " " * NUMBER_WIDTH
+
     if state.total == 0:
-        text = Text(f"{trace_id[:6]} · waiting for spans…", style=MUTED)
+        text = Text()
+        text.append(number_field, style=f"bold {INDEX_COLOR}")
+        text.append(f"  {trace_id[:6]} · waiting for spans…", style=MUTED)
         return text, MUTED
 
     if state.shape == HUB and state.hub:
@@ -479,6 +531,7 @@ def sidebar_label(trace_id: str, state: TraceState, alias_map: dict[str, str]) -
 
     duration = format_ms(state.duration_ms)
     bar = _latency_bar(state.duration_ms)
+    bar_style = _latency_bar_style(bar)
 
     if state.failed and state.failed == state.total:
         style = ERROR
@@ -497,10 +550,14 @@ def sidebar_label(trace_id: str, state: TraceState, alias_map: dict[str, str]) -
     marker_padded = marker.ljust(MARKER_WIDTH)
 
     text = Text()
-    text.append(f"{trace_id[:6]}", style=MUTED)
+    text.append(number_field, style=f"bold {INDEX_COLOR}")
+    text.append(f"  {trace_id[:6]}", style=MUTED)
     text.append(" · ", style=MUTED)
     text.append(f"{marker_padded}{header}\n", style=text_style)
-    text.append(f"  {state.completed}/{state.total} ✓  {bar} {duration}", style=text_style)
+    text.append(" " * _SIDEBAR_HEADER_COL, style=text_style)
+    text.append(f"{state.completed}/{state.total} ✓  ", style=text_style)
+    text.append(bar, style=bar_style)
+    text.append(f" {duration}", style=text_style)
     return text, style
 
 
@@ -1252,6 +1309,13 @@ class LiveApp(App):
         border: round #1f3d32;
         background: #080c0a;
         padding: 0 1;
+        /* Border titles have no default color rule in Textual, so this one
+           was inheriting the border's own line color (#1f3d32) -- barely
+           readable against the near-black background behind it. Matches
+           #trace-list Label's own color below for a consistent "legible
+           secondary text" tone, bold so it still reads as a heading. */
+        border-title-color: #9ca3af;
+        border-title-style: bold;
     }
     #trace-list > ListView {
         height: 100%;
@@ -1356,6 +1420,16 @@ class LiveApp(App):
         self._active_trace_id: str | None = None
         self._trace_ids: list[str] = []
         self._trace_rollup_cache: dict[str, TraceState] = {}
+        # Sequential, oldest-first index shown on each sidebar row --
+        # assigned once per trace_id the first time `_refresh_trace_list`
+        # ever sees it, then never reassigned. Deliberately not derived
+        # from the row's current position (which is newest-first and
+        # reshuffles every poll) or recomputed from `started_at` on each
+        # refresh (which would also reshuffle if a trace's spans ever
+        # arrived out of order) -- this dict is the one stable record of
+        # "first-seen order" for the life of the app.
+        self._trace_seq: dict[str, int] = {}
+        self._next_trace_seq = 1
         self._alias_map: dict[str, str] = {}
         self._bootstrapped = False
         self._follow_latest = True
@@ -1389,17 +1463,26 @@ class LiveApp(App):
         with Vertical():
             with Horizontal(id="main-row"):
                 trace_list = ListView(id="trace-list")
-                # A one-time, compact scale hint for the latency bar (see
-                # _latency_bar) -- discoverable without repeating it on
-                # every row or adding a dedicated legend row.
-                trace_list.border_title = f"Traces · bar caps @{LATENCY_BAR_SCALE_MS // 1000}s"
+                # A one-time hint for the latency bar's color (see
+                # _latency_bar_style) -- discoverable without repeating it
+                # on every row or adding a dedicated legend row. This used
+                # to read "Traces · bar caps @2s" (the bar's *scale*, not
+                # its color meaning) -- now that the bar's color is its own
+                # signal (speed, independent of the row's outcome color),
+                # that's the more useful thing to spend this line on. Both
+                # would technically still fit in #trace-list's 46-col
+                # width, but packing both clauses in made the line denser
+                # to read, working against the point of fixing its
+                # legibility -- so the scale detail was dropped rather than
+                # squeezed in.
+                trace_list.border_title = "Traces — bar = speed (green→red)"
                 yield trace_list
                 with Vertical(id="diagram-col"):
                     with HorizontalScroll(id="diagram-scroll"):
                         yield DiagramCanvas("", id="diagram-content")
                 with Vertical(id="inspector-col"):
                     with VerticalScroll(id="inspector-scroll", classes="inspector-empty"):
-                        yield Static(_inspector_logo_text(), id="inspector-content")
+                        yield InspectorCanvas("", id="inspector-content")
             events_log = RichLog(id="events-panel", highlight=False, markup=False, auto_scroll=True)
             events_log.border_title = "Live messages"
             yield events_log
@@ -1483,6 +1566,18 @@ class LiveApp(App):
         traces = traces[:MAX_TRACE_LIST]
         new_ids = [t["trace_id"] for t in traces]
 
+        # Assign sequence numbers to any trace seen for the first time this
+        # refresh -- sorted oldest-first (by `started_at`) among just the
+        # newcomers, not in `traces`' own newest-first order, so a batch of
+        # several brand-new traces in one poll (e.g. everything already in
+        # the db at startup) still gets numbered 1, 2, 3... in the order
+        # they actually happened, not the order this loop happens to visit
+        # them.
+        newcomers = sorted((t for t in traces if t["trace_id"] not in self._trace_seq), key=lambda t: t["started_at"])
+        for t in newcomers:
+            self._trace_seq[t["trace_id"]] = self._next_trace_seq
+            self._next_trace_seq += 1
+
         trace_list = self.query_one("#trace-list", ListView)
 
         if new_ids != self._trace_ids:
@@ -1508,7 +1603,7 @@ class LiveApp(App):
                 state = build_trace_state(spans, hub_hint=self._hub_hint())
                 self._trace_rollup_cache[t["trace_id"]] = state
 
-            label_text, _style = sidebar_label(t["trace_id"], state, self._alias_map)
+            label_text, _style = sidebar_label(t["trace_id"], state, self._alias_map, self._trace_seq.get(t["trace_id"]))
             try:
                 item = trace_list.query_one(f"#{_trace_widget_id(t['trace_id'])}", ListItem)
                 label_widget = item.query_one(Label)
