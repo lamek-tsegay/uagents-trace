@@ -935,27 +935,10 @@ def _peer_hop_detail(hop: Hop, spans: list[dict[str, Any]], started_at: int, ali
 
 
 INSPECTOR_EMPTY_HINT = "click an agent for details"
-
-
-def _inspector_logo_text() -> Text:
-    """Compact empty-state brand mark -- just the hero wordmark from
-    `brand.HERO_BANNER` (61 cols), reusing the exact same pre-rendered rows
-    the splash's stacked tier is built from (`_HERO_LINES_PADDED`) rather
-    than inventing new art. The splash's full co-branded lockup (hero +
-    fetch.ai mark) measures 72-78 cols depending on tier -- wider than
-    `#inspector-col`'s ~70-col usable width -- so this is hero-only, the
-    smaller of the two marks already in `brand.py`. Styled in the calm
-    `ACCENT` green (not `SPLASH_HERO_GREEN`, reserved for the splash's
-    one-time flash) since this sits on screen persistently.
-    """
-    text = Text(justify="center")
-    for i, line in enumerate(_HERO_LINES_PADDED):
-        if i:
-            text.append("\n")
-        text.append(line, style=f"bold {ACCENT}")
-    text.append("\n\n")
-    text.append(INSPECTOR_EMPTY_HINT, style="dim")
-    return text
+# The empty-state builder (_build_empty_state_text) lives further down this
+# file, after the splash's own constants (SPLASH_HERO_GREEN, _HERO_FADE_COLORS,
+# _HERO_LINES_PADDED) -- it reuses those directly for the logo shimmer rather
+# than duplicating them up here.
 
 
 def build_agent_inspector_text(
@@ -964,10 +947,22 @@ def build_agent_inspector_text(
     state: TraceState,
     spans: list[dict[str, Any]],
     alias_map: dict[str, str],
+    *,
+    session_stats: SessionStats,
+    available_height: int,
 ) -> Text:
-    """Deep, sectioned detail for exactly one clicked agent. Nothing else
-    from the trace leaks in here; that's the point of click-to-reveal
-    instead of dumping every agent's detail into the panel at once.
+    """Deep, sectioned detail for exactly one clicked agent, on top, and a
+    session-stats footer below it (same Session/Timing/Failures blocks,
+    same computation, as the empty state -- see
+    `_append_session_stat_blocks`) -- filling what used to be a tall,
+    mostly-empty panel below a short detail block. Nothing else from the
+    trace leaks into the top part; that's still the point of click-to-
+    reveal instead of dumping every agent's detail into the panel at once.
+
+    The footer is the lowest layout priority: if `available_height` is too
+    short for both, the per-agent detail above always wins and the footer
+    (or its lower blocks -- see `_append_session_stat_blocks`'s own drop
+    order) is what shrinks or disappears, never the other way around.
     """
     text = Text()
     text.append(f"Session  {trace_id}\n\n", style=MUTED)
@@ -976,42 +971,45 @@ def build_agent_inspector_text(
         leg = next((leg for leg in state.legs if leg["subagent"] == agent), None)
         if leg is None:
             text.append("No detail for this agent in the current trace.", style="dim")
-            return text
-        text.append_text(_hub_leg_detail(leg, spans, state.hub, state.started_at, alias_map))
-        return text
-
-    outbound, reply = _latest_peer_round_trip(state.hops)
-    if outbound is None:
-        text.append("No detail for this agent in the current trace.", style="dim")
-        return text
-    if agent == outbound.source:
-        text.append_text(_peer_hop_detail(outbound, spans, state.started_at, alias_map))
-    elif reply is not None and agent == outbound.dest:
-        text.append_text(_peer_hop_detail(reply, spans, state.started_at, alias_map))
-    elif agent == outbound.dest:
-        # Outbound sent, no reply yet -- still show what we know about the
-        # outbound leg (message/timing/delivery) rather than nothing.
-        name = display_name(agent, alias_map)
-        src_name = display_name(outbound.source, alias_map)
-        text.append(f"… {name}\n\n", style=f"bold {WARN}")
-        text.append_text(_message_section(_format_payload(outbound), outbound.protocol))
-        text.append("\n")
-        enq_rel = _relative_ms(outbound.enqueued_at, state.started_at)
-        text.append_text(_timing_section([("sent", enq_rel, None, None)]))
-        text.append("\n")
-        raw = _find_span(spans, outbound.source, outbound.dest, "send")
-        text.append_text(
-            _delivery_section(
-                raw.get("payload_size") if raw else None,
-                src_name,
-                outbound.source_registered,
-                name,
-                outbound.dest_registered,
-            )
-        )
-        text.append("\n  waiting for reply…", style=WARN)
+        else:
+            text.append_text(_hub_leg_detail(leg, spans, state.hub, state.started_at, alias_map))
     else:
-        text.append("No detail for this agent in the current trace.", style="dim")
+        outbound, reply = _latest_peer_round_trip(state.hops)
+        if outbound is None:
+            text.append("No detail for this agent in the current trace.", style="dim")
+        elif agent == outbound.source:
+            text.append_text(_peer_hop_detail(outbound, spans, state.started_at, alias_map))
+        elif reply is not None and agent == outbound.dest:
+            text.append_text(_peer_hop_detail(reply, spans, state.started_at, alias_map))
+        elif agent == outbound.dest:
+            # Outbound sent, no reply yet -- still show what we know about
+            # the outbound leg (address/message/timing/delivery) rather
+            # than nothing.
+            name = display_name(agent, alias_map)
+            src_name = display_name(outbound.source, alias_map)
+            text.append(f"… {name}\n\n", style=f"bold {WARN}")
+            text.append_text(_address_section([(src_name, outbound.source), (name, outbound.dest)]))
+            text.append("\n")
+            text.append_text(_message_section(_format_payload(outbound), outbound.protocol, outbound.detail))
+            text.append("\n")
+            enq_rel = _relative_ms(outbound.enqueued_at, state.started_at)
+            text.append_text(_timing_section([("sent", enq_rel, None, None)], sent_at_ms=outbound.enqueued_at))
+            text.append("\n")
+            raw = _find_span(spans, outbound.source, outbound.dest, "send")
+            text.append_text(
+                _delivery_section(
+                    raw.get("payload_size") if raw else None,
+                    src_name,
+                    outbound.source_registered,
+                    name,
+                    outbound.dest_registered,
+                )
+            )
+            text.append("\n  waiting for reply…", style=WARN)
+        else:
+            text.append("No detail for this agent in the current trace.", style="dim")
+
+    _append_session_footer(text, session_stats, available_height)
     return text
 
 
