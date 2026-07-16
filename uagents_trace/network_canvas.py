@@ -30,16 +30,36 @@ STATUS_GLYPH = {
     "pending": ("⋯", WARN),
 }
 
-# Fixed layout — orthogonal arrows only (│ ─ ▼), no diagonals.
+# Orthogonal arrows only (│ ─ ▼), no diagonals. Rows that never grow --
+# they're sized to their own fixed content (a 3-row box, a 1-row subtitle)
+# regardless of how much panel space is available.
 HUB_ROW = 0
 SUBTITLE_ROW = 3
 LINE_TOP = 4
-BUS_ROW = 6
-AGENT_ROW = 10
-STATUS_ROW = 13
-CANVAS_HEIGHT = 14
 BOX_MIN_WIDTH = 10
-AGENT_GAP = 14
+
+# Below: MINIMUMS (the pre-size-aware fixed layout, used whenever a caller
+# doesn't pass available_width/available_height -- e.g. a test, or a
+# terminal too small to offer anything extra) and MAXIMUMS (so an ultrawide
+# terminal doesn't stretch things absurdly). Filling extra space always
+# widens gaps/connectors, never the boxes themselves -- see _agent_columns
+# and _hub_vertical_spacing.
+MIN_AGENT_GAP = 14
+MAX_AGENT_GAP = 40
+MIN_COL_WIDTH = 22
+
+MIN_STEM_HEIGHT = 2  # hub box bottom -> bus line
+MAX_STEM_HEIGHT = 6
+MIN_DROP_HEIGHT = 3  # bus line -> agent box top, incl. the arrowhead row
+MAX_DROP_HEIGHT = 8
+# Rows that don't grow with available height: hub box (3) + subtitle (1)
+# + bus line (1) + agent box (3) + status glyph row (1).
+_HUB_FIXED_ROWS = 9
+
+MIN_PEER_GAP = 24
+MAX_PEER_GAP = 60
+MIN_PEER_HEIGHT = 11
+MAX_PEER_HEIGHT = 15
 
 
 class Canvas:
@@ -90,8 +110,8 @@ class Canvas:
         *,
         double: bool = False,
     ) -> tuple[int, int]:
-        """Draw a 3-line box; return (width, center_x). Un-bold by default --
-        bold is reserved for a caller explicitly flagging failure.
+        """Draw a 3-line box; return (total_width, center_x). Un-bold by
+        default -- bold is reserved for a caller explicitly flagging failure.
 
         `double` switches to double-line border glyphs -- the visual marker
         for "this is the currently-selected agent", distinguishable even
@@ -99,12 +119,13 @@ class Canvas:
         weight alone wouldn't read as a different thing).
         """
         w = max(len(label) + 2, BOX_MIN_WIDTH)
+        total_w = w + 2  # both border columns included
         box_style = style or ACCENT
         tl, tr, bl, br, h, v = ("╔", "╗", "╚", "╝", "═", "║") if double else ("┌", "┐", "└", "┘", "─", "│")
         self.text_over(x, y, tl + h * w + tr, box_style)
         self.text_over(x, y + 1, v + label.center(w) + v, box_style)
         self.text_over(x, y + 2, bl + h * w + br, box_style)
-        return w, x + w // 2
+        return total_w, x + total_w // 2
 
     def to_text(self, default_style: str | None = None) -> Text:
         result = Text()
@@ -134,44 +155,59 @@ def format_ms(ms: int | None) -> str:
     return f"{ms}ms"
 
 
-def build_diagram_legend() -> Text:
-    """Color key for the diagram -- what each arrow/glyph color means."""
-    legend = Text()
-    legend.append("● ", style=MUTED)
-    legend.append("dispatch", style=MUTED)
-    legend.append("   ● ", style=SUCCESS)
-    legend.append("delivered", style=SUCCESS)
-    legend.append("   ● ", style=WARN)
-    legend.append("pending", style=WARN)
-    legend.append("   ● ", style=ERROR)
-    legend.append("failed", style=ERROR)
-    return legend
-
-
-def build_table_legend() -> Text:
-    """Column key for the leg/route table -- what Out/In/Total measure."""
-    return Text(
-        "Out = send ack  ·  In = return ack  ·  Total = round trip (incl. processing)",
-        style=MUTED,
-    )
-
-
 def block_width(text: Text) -> int:
     lines = [line for line in text.plain.split("\n") if line.strip()]
     return max((len(line) for line in lines), default=0)
 
 
-def _agent_columns(n: int, box_widths: list[int]) -> tuple[list[tuple[int, int]], int]:
-    """Return ([(x_start, center_x), ...], total_width) — agents evenly spaced and centered."""
+def _agent_columns(
+    n: int, box_widths: list[int], available_width: int | None
+) -> tuple[list[tuple[int, int]], int]:
+    """Return ([(x_start, center_x), ...], total_width).
+
+    Every column gets the *same* width (`col_w`), and each agent's center
+    is pinned to the exact midpoint of its own column (`i*col_w +
+    col_w//2`) regardless of that agent's own box width -- so centers form
+    a perfect arithmetic sequence (exactly evenly spaced) even when agent
+    names have different lengths. A box narrower than its column is
+    centered *around* that fixed midpoint, not left-aligned within it.
+
+    `col_w` itself grows from the content-driven minimum up toward
+    `available_width` (capped) when there's room -- widening the gap
+    between boxes, never the boxes.
+    """
     if n == 0:
         return [], 0
-    col_w = max(max(box_widths) + AGENT_GAP, 22)
-    total_w = n * col_w
-    positions = []
-    for i, bw in enumerate(box_widths):
-        x0 = i * col_w + (col_w - bw) // 2
-        positions.append((x0, x0 + bw // 2))
-    return positions, total_w
+    max_box_w = max(box_widths)
+    natural_col_w = max(max_box_w + MIN_AGENT_GAP, MIN_COL_WIDTH)
+    col_w = natural_col_w
+    if available_width:
+        max_col_w = max_box_w + MAX_AGENT_GAP
+        candidate = min(available_width // n, max_col_w)
+        col_w = max(natural_col_w, candidate)
+
+    positions: list[tuple[int, int]] = []
+    for bw in box_widths:
+        i = len(positions)
+        cx = i * col_w + col_w // 2
+        total_box_w = bw + 2
+        x0 = cx - total_box_w // 2
+        positions.append((x0, cx))
+    return positions, n * col_w
+
+
+def _hub_vertical_spacing(available_height: int | None) -> tuple[int, int]:
+    """(stem_height, drop_height) -- rows of vertical connector above and
+    below the bus line. Growing these (never the boxes) is how the hub
+    diagram fills a taller panel; the MIN_* floors match the pre-size-aware
+    fixed layout, so a short terminal never looks more cramped than before.
+    """
+    if not available_height:
+        return MIN_STEM_HEIGHT, MIN_DROP_HEIGHT
+    slack = max(available_height - _HUB_FIXED_ROWS - MIN_STEM_HEIGHT - MIN_DROP_HEIGHT, 0)
+    stem_bonus = min(slack // 2, MAX_STEM_HEIGHT - MIN_STEM_HEIGHT)
+    drop_bonus = min(slack - stem_bonus, MAX_DROP_HEIGHT - MIN_DROP_HEIGHT)
+    return MIN_STEM_HEIGHT + stem_bonus, MIN_DROP_HEIGHT + drop_bonus
 
 
 def _line_style(state: str, pulse: bool) -> str:
@@ -211,17 +247,22 @@ def _draw_hub_arrows(
     agent_centers: list[int],
     leg_states: list[str],
     *,
+    bus_row: int,
+    agent_row: int,
     pulse: bool,
 ) -> None:
-    """One orthogonal arrow per sub-agent: stem → bus → drop → ▼."""
+    """One orthogonal arrow per sub-agent: stem → bus → drop → ▼.
+
+    `bus_row`/`agent_row` come from the layout that also placed the boxes
+    (see HubLayout), so the junction/drop/arrowhead columns drawn here are
+    always the *same* `agent_centers` values used to position the boxes
+    themselves -- they can't drift apart.
+    """
     if not agent_centers:
         return
 
-    bus_style = _stem_style(
-        [{"state": s} for s in leg_states],
-        pulse,
-    )
-    arrow_tip = AGENT_ROW - 1
+    bus_style = _stem_style([{"state": s} for s in leg_states], pulse)
+    arrow_tip = agent_row - 1
 
     if len(agent_centers) == 1:
         cx = agent_centers[0]
@@ -230,31 +271,26 @@ def _draw_hub_arrows(
             canvas.vline(hub_cx, LINE_TOP, arrow_tip - 1, style)
             canvas.text_over(hub_cx, arrow_tip, "▼", style)
         else:
-            canvas.vline(hub_cx, LINE_TOP, BUS_ROW - 1, style)
+            canvas.vline(hub_cx, LINE_TOP, bus_row - 1, style)
             lo, hi = min(hub_cx, cx), max(hub_cx, cx)
             for x in range(lo, hi + 1):
-                if x == hub_cx:
-                    ch = "┬"
-                elif x == cx:
-                    ch = "┬"
-                else:
-                    ch = "─"
-                canvas.text_over(x, BUS_ROW, ch, style)
-            canvas.vline(cx, BUS_ROW + 1, arrow_tip - 1, style)
+                ch = "┬" if x in (hub_cx, cx) else "─"
+                canvas.text_over(x, bus_row, ch, style)
+            canvas.vline(cx, bus_row + 1, arrow_tip - 1, style)
             canvas.text_over(cx, arrow_tip, "▼", style)
         return
 
     min_x = min(agent_centers)
     max_x = max(agent_centers)
 
-    canvas.vline(hub_cx, LINE_TOP, BUS_ROW - 1, bus_style)
+    canvas.vline(hub_cx, LINE_TOP, bus_row - 1, bus_style)
     for x in range(min_x, max_x + 1):
         ch = _bus_junction_char(x, hub_cx, set(agent_centers))
-        canvas.text_over(x, BUS_ROW, ch, bus_style)
+        canvas.text_over(x, bus_row, ch, bus_style)
 
     for agent_cx, state in zip(agent_centers, leg_states):
         style = _line_style(state, pulse)
-        canvas.vline(agent_cx, BUS_ROW + 1, arrow_tip - 1, style)
+        canvas.vline(agent_cx, bus_row + 1, arrow_tip - 1, style)
         canvas.text_over(agent_cx, arrow_tip, "▼", style)
 
 
@@ -291,40 +327,61 @@ class HubLayout:
     """
 
     total_w: int
+    total_h: int
     hub_box: BoxRegion
     hub_cx: int
     agent_boxes: list[BoxRegion]
     agent_centers: list[int]
+    bus_row: int
+    agent_row: int
+    status_row: int
 
 
-def _compute_hub_layout(legs: list[dict[str, Any]], hub_name: str, agent_names: list[str]) -> HubLayout:
+def _compute_hub_layout(
+    legs: list[dict[str, Any]],
+    hub_name: str,
+    agent_names: list[str],
+    available_width: int | None = None,
+    available_height: int | None = None,
+) -> HubLayout:
     n = len(legs)
     box_widths = [max(len(name) + 2, BOX_MIN_WIDTH) for name in agent_names]
     inner_w = max(len(hub_name) + 2, BOX_MIN_WIDTH)
-    columns, agents_w = _agent_columns(n, box_widths)
+    columns, agents_w = _agent_columns(n, box_widths, available_width)
     total_w = max(agents_w, inner_w + 2 + 8)
 
-    hub_x = (total_w - (inner_w + 2)) // 2
     hub_w = inner_w + 2
+    hub_x = (total_w - hub_w) // 2
     hub_cx = hub_x + hub_w // 2
 
     offset = (total_w - agents_w) // 2
     agent_boxes: list[BoxRegion] = []
     agent_centers: list[int] = []
+
+    stem_height, drop_height = _hub_vertical_spacing(available_height)
+    bus_row = LINE_TOP + stem_height
+    agent_row = bus_row + 1 + drop_height
+    status_row = agent_row + 3
+    total_h = status_row + 1
+
     for i, bw in enumerate(box_widths):
         x0, cx = columns[i]
         x0 += offset
         cx += offset
         box_w = bw + 2
-        agent_boxes.append((x0, AGENT_ROW, x0 + box_w, AGENT_ROW + 3))
+        agent_boxes.append((x0, agent_row, x0 + box_w, agent_row + 3))
         agent_centers.append(cx)
 
     return HubLayout(
         total_w=total_w,
+        total_h=total_h,
         hub_box=(hub_x, HUB_ROW, hub_x + hub_w, HUB_ROW + 3),
         hub_cx=hub_cx,
         agent_boxes=agent_boxes,
         agent_centers=agent_centers,
+        bus_row=bus_row,
+        agent_row=agent_row,
+        status_row=status_row,
     )
 
 
@@ -332,14 +389,20 @@ def build_hub_hit_regions(
     legs: list[dict[str, Any]],
     hub_name: str,
     agent_names: list[str],
+    available_width: int | None = None,
+    available_height: int | None = None,
 ) -> list[BoxRegion]:
     """Per-leg box regions, same order as `legs`/`agent_names` -- for the
     live TUI to hit-test a click against. Excludes the hub's own box: the
     hub isn't a leg, so there's no per-agent detail to show for clicking it.
+
+    `available_width`/`available_height` must match whatever was passed to
+    `build_hub_topology` for the same render, or the hit regions computed
+    here will silently diverge from what's actually on screen.
     """
     if not legs:
         return []
-    return _compute_hub_layout(legs, hub_name, agent_names).agent_boxes
+    return _compute_hub_layout(legs, hub_name, agent_names, available_width, available_height).agent_boxes
 
 
 def build_hub_topology(
@@ -349,6 +412,8 @@ def build_hub_topology(
     *,
     pulse: bool = False,
     selected: str | None = None,
+    available_width: int | None = None,
+    available_height: int | None = None,
 ) -> Text:
     """Star topology: boxed hub centered above sub-agents, one arrow each.
 
@@ -356,16 +421,26 @@ def build_hub_topology(
     a double-line border so it reads as "highlighted" even when it's
     already bold-red for a failed leg, where weight alone wouldn't show a
     difference.
+
+    `available_width`/`available_height`, if given, let the layout grow to
+    fill more of the panel (wider gaps between boxes, longer connector
+    lines) -- see `_agent_columns`/`_hub_vertical_spacing`. Omitting them
+    falls back to the same fixed minimum layout as before.
     """
     if not legs:
-        canvas = Canvas(max(len(hub_name) + 6, 28), 6)
+        placeholder_w = max(len(hub_name) + 6, 28)
+        if available_width:
+            placeholder_w = max(placeholder_w, available_width)
+        canvas = Canvas(placeholder_w, 6)
         w = max(len(hub_name) + 2, BOX_MIN_WIDTH)
-        canvas.draw_box((28 - w) // 2, 1, hub_name)
-        canvas.text_over(2, 5, "Waiting for dispatch to sub-agents…", MUTED)
+        box_total_w = w + 2
+        canvas.draw_box((placeholder_w - box_total_w) // 2, 1, hub_name)
+        caption = "Waiting for dispatch to sub-agents…"
+        canvas.text_over(max((placeholder_w - len(caption)) // 2, 0), 5, caption, MUTED)
         return canvas.to_text()
 
-    layout = _compute_hub_layout(legs, hub_name, agent_names)
-    canvas = Canvas(layout.total_w, CANVAS_HEIGHT)
+    layout = _compute_hub_layout(legs, hub_name, agent_names, available_width, available_height)
+    canvas = Canvas(layout.total_w, layout.total_h)
     hub_x, hub_y, _, _ = layout.hub_box
     canvas.draw_box(hub_x, hub_y, hub_name)
     subtitle = "orchestrator"
@@ -383,9 +458,17 @@ def build_hub_topology(
         canvas.draw_box(x0, y0, agent_names[i], style=box_style, double=is_selected)
         leg_states.append(leg_state)
         glyph, glyph_style = _status_glyph(leg_state, pulse)
-        canvas.text_over(layout.agent_centers[i], STATUS_ROW, glyph, glyph_style)
+        canvas.text_over(layout.agent_centers[i], layout.status_row, glyph, glyph_style)
 
-    _draw_hub_arrows(canvas, layout.hub_cx, layout.agent_centers, leg_states, pulse=pulse)
+    _draw_hub_arrows(
+        canvas,
+        layout.hub_cx,
+        layout.agent_centers,
+        leg_states,
+        bus_row=layout.bus_row,
+        agent_row=layout.agent_row,
+        pulse=pulse,
+    )
 
     return canvas.to_text()
 
@@ -395,37 +478,71 @@ class PeerLayout:
     """Geometry for one peer topology render -- see `HubLayout`."""
 
     total_w: int
+    total_h: int
     left_box: BoxRegion
     right_box: BoxRegion
     left_cx: int
     right_cx: int
+    arrow_row: int
+    status_row: int
 
 
-def _compute_peer_layout(left_name: str, right_name: str) -> PeerLayout:
+def _compute_peer_layout(
+    left_name: str,
+    right_name: str,
+    available_width: int | None = None,
+    available_height: int | None = None,
+) -> PeerLayout:
     left_w = max(len(left_name) + 2, BOX_MIN_WIDTH)
     right_w = max(len(right_name) + 2, BOX_MIN_WIDTH)
-    gap = 24
-    total_w = left_w + gap + right_w + 4
+    natural_total_w = left_w + MIN_PEER_GAP + right_w + 4
+
+    gap = MIN_PEER_GAP
+    total_w = natural_total_w
+    if available_width and available_width > natural_total_w:
+        max_total_w = left_w + MAX_PEER_GAP + right_w + 4
+        total_w = min(available_width, max_total_w)
+        gap = total_w - left_w - right_w - 4
 
     lx = (total_w - left_w - gap - right_w) // 2
     rx = lx + left_w + gap
     left_box_w = left_w + 2
     right_box_w = right_w + 2
 
+    total_h = MIN_PEER_HEIGHT
+    if available_height:
+        total_h = max(MIN_PEER_HEIGHT, min(available_height, MAX_PEER_HEIGHT))
+    # The fixed-height layout's rows (arrow@2, box@4, status@8) shift down
+    # together by half of any extra height, so the whole cluster stays
+    # vertically centered in a taller canvas rather than pinned to the top.
+    voffset = (total_h - MIN_PEER_HEIGHT) // 2
+    arrow_row = 2 + voffset
+    box_row = 4 + voffset
+    status_row = 8 + voffset
+
     return PeerLayout(
         total_w=total_w,
-        left_box=(lx, 4, lx + left_box_w, 4 + 3),
-        right_box=(rx, 4, rx + right_box_w, 4 + 3),
+        total_h=total_h,
+        left_box=(lx, box_row, lx + left_box_w, box_row + 3),
+        right_box=(rx, box_row, rx + right_box_w, box_row + 3),
         left_cx=lx + left_box_w // 2,
         right_cx=rx + right_box_w // 2,
+        arrow_row=arrow_row,
+        status_row=status_row,
     )
 
 
-def build_peer_hit_regions(left_name: str, right_name: str) -> tuple[BoxRegion, BoxRegion]:
+def build_peer_hit_regions(
+    left_name: str,
+    right_name: str,
+    available_width: int | None = None,
+    available_height: int | None = None,
+) -> tuple[BoxRegion, BoxRegion]:
     """(left_box, right_box) regions -- for the live TUI to hit-test a click
-    against. Mirrors `build_hub_hit_regions` for the two-agent case.
+    against. Mirrors `build_hub_hit_regions` for the two-agent case; same
+    caveat about matching whatever was passed to `build_peer_topology`.
     """
-    layout = _compute_peer_layout(left_name, right_name)
+    layout = _compute_peer_layout(left_name, right_name, available_width, available_height)
     return layout.left_box, layout.right_box
 
 
@@ -436,12 +553,18 @@ def build_peer_topology(
     state: str = "completed",
     pulse: bool = False,
     selected: str | None = None,
+    available_width: int | None = None,
+    available_height: int | None = None,
 ) -> Text:
-    """Two boxed agents with a single outbound arrow — details in the table."""
+    """Two boxed agents with a single outbound arrow -- a single centered
+    horizontal connection that scales its gap (and, modestly, its overall
+    height) to `available_width`/`available_height`, same spirit as the
+    hub topology but simpler since there's no branching to lay out.
+    """
     style = _line_style(state, pulse)
     box_style = _box_style(state)
-    layout = _compute_peer_layout(left_name, right_name)
-    canvas = Canvas(layout.total_w, 11)
+    layout = _compute_peer_layout(left_name, right_name, available_width, available_height)
+    canvas = Canvas(layout.total_w, layout.total_h)
 
     lx, ly, _, _ = layout.left_box
     rx, ry, _, _ = layout.right_box
@@ -450,70 +573,14 @@ def build_peer_topology(
     canvas.draw_box(lx, ly, left_name, style=left_style, double=selected == left_name)
     canvas.draw_box(rx, ry, right_name, style=right_style, double=selected == right_name)
 
-    canvas.hline(layout.left_cx, layout.right_cx - 1, 2, style)
-    canvas.text_over(layout.right_cx, 2, "▶", style)
+    canvas.hline(layout.left_cx, layout.right_cx - 1, layout.arrow_row, style)
+    canvas.text_over(layout.right_cx, layout.arrow_row, "▶", style)
 
     glyph, glyph_style = _status_glyph(state, pulse)
-    canvas.text_over(layout.left_cx, 8, glyph, glyph_style)
-    canvas.text_over(layout.right_cx, 8, glyph, glyph_style)
+    canvas.text_over(layout.left_cx, layout.status_row, glyph, glyph_style)
+    canvas.text_over(layout.right_cx, layout.status_row, glyph, glyph_style)
 
     return canvas.to_text()
-
-
-def _centered_line(line: Text, width: int) -> Text:
-    pad = max(0, (width - len(line.plain)) // 2)
-    result = Text(" " * pad)
-    result.append_text(line)
-    return result
-
-
-def assemble_centered_diagram(
-    topology: Text,
-    table: Text,
-    legend: Text,
-    table_legend: Text | None = None,
-) -> Text:
-    """Stack topology, table, and legend(s) centered as one block.
-
-    Centers by padding rather than restyling to `.plain`, so a
-    multi-colored legend (e.g. per-status dots) keeps its per-run styles
-    instead of collapsing to a single flat color.
-    """
-    width = block_width(topology)
-    width = max(width, block_width(table), len(legend.plain))
-    if table_legend is not None:
-        width = max(width, len(table_legend.plain))
-
-    result = Text()
-    result.append_text(_center_plain_block(topology, width))
-    result.append("\n\n")
-    result.append_text(_center_plain_block(table, width))
-    result.append("\n")
-    if table_legend is not None:
-        result.append_text(_centered_line(table_legend, width))
-        result.append("\n")
-    result.append_text(_centered_line(legend, width))
-    return result
-
-
-def center_in_width(block: Text, width: int) -> Text:
-    """Center a multi-line block within a given character width."""
-    lines = list(block.split("\n"))
-    content_width = max((len(line.plain) for line in lines if line.plain.strip()), default=0)
-    left_pad = max(0, (width - content_width) // 2)
-    result = Text()
-    for i, line in enumerate(lines):
-        if i:
-            result.append("\n")
-        if not line.plain.strip():
-            continue
-        result.append(" " * left_pad)
-        result.append_text(line)
-    return result
-
-
-def _center_plain_block(block: Text, width: int) -> Text:
-    return center_in_width(block, width)
 
 
 # Back-compat aliases
