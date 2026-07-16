@@ -5,19 +5,21 @@ from uagents import Model
 from uagents_trace.live import (
     DEGRADED_MARKER,
     FAILURE_MARKER,
+    INDEX_COLOR,
     LATENCY_BAR_EMPTY,
     LATENCY_BAR_FILLED,
     LATENCY_BAR_SCALE_MS,
     LATENCY_BAR_WIDTH,
     MUTED,
     _latency_bar,
+    _latency_bar_style,
     build_hub_tree_diagram,
     format_event_line,
     message_label,
     render_agent_box,
     sidebar_label,
 )
-from uagents_trace.network_canvas import ERROR, SUCCESS, WARN, build_hub_topology, build_peer_topology, format_ms
+from uagents_trace.network_canvas import ERROR, GREEN, SUCCESS, WARN, build_hub_topology, build_peer_topology, format_ms
 from uagents_trace.recorder import payload_summary
 from uagents_trace.shape import build_hops, build_interaction_tree, build_trace_state
 
@@ -241,14 +243,18 @@ class SidebarLabelTests(unittest.TestCase):
             ),
         ]
         state = build_trace_state(spans, hub_hint="orch")
-        text, style = sidebar_label("1ffa482a-dead-beef", state, {"orch": "Orchestrator"})
+        text, style = sidebar_label("1ffa482a-dead-beef", state, {"orch": "Orchestrator"}, number=7)
         plain = text.plain
 
         def style_at(index: int) -> str:
             return next(run.style for run in text.spans if run.start <= index < run.end)
 
-        # The id segment (line 1, column 0) is always neutral/dim...
-        self.assertEqual(style_at(0), MUTED)
+        # The leading number (line 1, column 0) is its own distinct color,
+        # not a status color...
+        self.assertEqual(style_at(0), f"bold {INDEX_COLOR}")
+        # ...the id next to it is neutral/dim...
+        id_idx = plain.index("1ffa48")
+        self.assertEqual(style_at(id_idx), MUTED)
         # ...while the header (line 1) and all of line 2 carry the
         # semantic color, not a single flat style applied to the whole
         # block.
@@ -440,12 +446,15 @@ class ColorEconomyTests(unittest.TestCase):
         self.assertTrue(all("bold" not in (style or "") for style in styles_at("Sub1")))
         self.assertIn(f"bold {ERROR}", styles_at("Sub2"))
 
-    def test_success_is_visibly_dimmer_than_error_and_accent(self):
-        # Regression guard for the color-economy fix itself: SUCCESS must
-        # no longer be the same saturated green as before -- if a future
-        # edit quietly reverts it, this should catch it rather than only
-        # showing up as a vibes-based UI regression.
-        self.assertNotEqual(SUCCESS, "#4ade80")
+    def test_success_is_unified_with_the_one_true_green(self):
+        # Regression guard for the live TUI's full green-unification:
+        # SUCCESS was once its own, deliberately dimmer green (see
+        # network_canvas.py's own comment on the constant) -- that tradeoff
+        # was dropped by explicit choice in favor of one green everywhere.
+        # If a future edit quietly re-splits them, this should catch it
+        # rather than only showing up as a vibes-based UI regression.
+        self.assertEqual(SUCCESS, GREEN)
+        self.assertEqual(SUCCESS, "#4ade80")
 
 
 if __name__ == "__main__":
