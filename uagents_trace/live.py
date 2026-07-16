@@ -579,11 +579,107 @@ def _relative_ms(t: int, started_at: int) -> int:
 _LEG_ICON = {"completed": STATE_ICON["delivered"], "failed": STATE_ICON["dropped"], "pending": STATE_ICON["pending"]}
 _LEG_STYLE = {"completed": SUCCESS, "failed": ERROR, "pending": WARN}
 
-# Section header color -- the calm, always-on brand accent (not
-# SPLASH_HERO_GREEN, which the splash's own comment reserves for its
-# one-time bright flash, not a persistent panel).
-_SECTION_STYLE = f"bold {ACCENT}"
+# Section header color -- the same vivid green as the splash hero
+# (`network_canvas.GREEN`, aliased below as `SPLASH_HERO_GREEN`). Used to
+# read as the calmer `ACCENT` on the theory that a persistent panel
+# shouldn't share the splash's one-time bright flash; that reservation no
+# longer holds -- the live TUI now uses one green everywhere, not two.
+_SECTION_STYLE = f"bold {GREEN}"
 _SECTION_LABEL_WIDTH = 15
+
+
+@dataclass
+class SessionStats:
+    """Aggregate rollup across every trace currently loaded in the sidebar
+    (`LiveApp._trace_rollup_cache` -- up to MAX_TRACE_LIST, the same
+    "loaded" the sidebar itself uses, not the full unbounded db history).
+    Computed here rather than in shape.py: it's a display-layer aggregation
+    over `TraceState`/`Hop` fields shape.py already computes, not new
+    trace-shape logic. Shared, verbatim, by the inspector's empty state
+    (`_build_empty_state_text`) and the selected-agent footer
+    (`_append_session_footer`) -- see the module's own coherence note --
+    defined up here (ahead of `build_agent_inspector_text`, which needs it
+    as a parameter type) rather than down by its two actual call sites.
+    """
+
+    trace_count: int
+    agent_count: int
+    success_rate: float | None  # None -- no legs/hops recorded anywhere yet
+    slowest_ms: int | None
+    fastest_ms: int | None
+    average_ms: int | None
+    failed_count: int
+    top_error: tuple[str, int] | None  # (message, occurrences), most frequent first
+
+
+def _compute_session_stats(states: list[TraceState]) -> SessionStats:
+    agents: set[str] = set()
+    completed = failed = total = 0
+    durations: list[int] = []
+    error_counts: Counter[str] = Counter()
+
+    for state in states:
+        agents.update(state.participants)
+        completed += state.completed
+        failed += state.failed
+        total += state.total
+        if state.duration_ms > 0:
+            durations.append(state.duration_ms)
+        for hop in state.hops:
+            if hop.error:
+                error_counts[hop.error] += 1
+
+    return SessionStats(
+        trace_count=len(states),
+        agent_count=len(agents),
+        success_rate=(completed / total * 100) if total else None,
+        slowest_ms=max(durations) if durations else None,
+        fastest_ms=min(durations) if durations else None,
+        average_ms=round(sum(durations) / len(durations)) if durations else None,
+        failed_count=failed,
+        top_error=error_counts.most_common(1)[0] if error_counts else None,
+    )
+
+
+def _session_block_lines(stats: SessionStats) -> list[str]:
+    if stats.trace_count == 0:
+        return ["waiting for traces…"]
+    rate = f"{stats.success_rate:.0f}% success" if stats.success_rate is not None else "no legs yet"
+    return [f"{stats.trace_count} traces · {stats.agent_count} agents · {rate}"]
+
+
+def _timing_block_lines(stats: SessionStats) -> list[str]:
+    if stats.average_ms is None:
+        return ["no completed round-trips yet"]
+    return [
+        f"slowest {format_ms(stats.slowest_ms)} · fastest {format_ms(stats.fastest_ms)} "
+        f"· avg {format_ms(stats.average_ms)}"
+    ]
+
+
+# Keeps the failures block's error line to one row at the inspector's
+# ~66-col usable width -- a hard cap rather than relying on Static's own
+# auto-wrap, so the block's row count (and therefore the layout-drop math
+# in _build_empty_state_text/_append_session_footer) is deterministic
+# instead of depending on exactly how long today's error message happens
+# to be.
+MAX_ERROR_PREVIEW = 52
+
+
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _failures_block_lines(stats: SessionStats) -> list[str]:
+    if stats.failed_count == 0:
+        return ["none 🎉"]
+    lines = [f"{stats.failed_count} failed"]
+    if stats.top_error:
+        message, count = stats.top_error
+        lines.append(f"most common ({count}×): {_truncate(message, MAX_ERROR_PREVIEW)}")
+    return lines
 
 
 def _format_bytes(n: int | None) -> str:
