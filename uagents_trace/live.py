@@ -77,10 +77,31 @@ MUTED = "#6b7280"
 # work's 3-slice history for the measurements behind both numbers.)
 MIN_WIDTH_FOR_INSPECTOR = 180
 
+# Live-messages feed -- height in terminal rows (2 border rows + N message
+# lines). 5 messages (height 7) is the target size; below
+# MIN_HEIGHT_FOR_TALL_FEED there isn't room for that alongside #main-row's
+# own 17-row floor (see #main-row's CSS comment) within a short terminal's
+# fixed vertical budget, so the feed falls back to its previous, tighter
+# size instead of clipping either panel's border -- the same
+# hide-rather-than-shrink approach MIN_WIDTH_FOR_INSPECTOR above takes on
+# the width axis.
+#   budget = terminal height - 1 (Header) - 1 (Footer)
+#   tall:  budget >= 17 (#main-row floor) + 7 (5-message feed) == 24  =>  H >= 26
+#   short: budget >= 17 (#main-row floor) + 5 (3-message feed) == 22  =>  H >= 24
+# An 80x24 terminal (H=24) clears the "short" floor but not "tall", so it
+# keeps showing 3 messages there -- unchanged from before this existed.
+EVENTS_PANEL_TALL_HEIGHT = 7
+EVENTS_PANEL_SHORT_HEIGHT = 5
+MIN_HEIGHT_FOR_TALL_FEED = 26
+
 # Textual CSS can't interpolate a Python constant into #inspector-col's
 # `width:` (braces in an f-string would collide with CSS block syntax), so
 # that value is hardcoded there -- this just catches the two drifting apart.
 assert BRAND_PANEL_WIDTH == 76, "update #inspector-col's CSS width alongside brand.BRAND_PANEL_WIDTH"
+# Content width inside #inspector-scroll: BRAND_PANEL_WIDTH minus its
+# border (1+1) and padding (2+2). Used for the selected-agent footer's
+# divider rule, which should span the panel's actual width, not a guess.
+INSPECTOR_CONTENT_WIDTH = BRAND_PANEL_WIDTH - 6
 
 
 def _trace_widget_id(trace_id: str) -> str:
@@ -1294,16 +1315,17 @@ class LiveApp(App):
         color: #6b7280;
     }
     #events-panel {
-        /* 5, not 6 -- #main-row's min-height grew from 16 to 17 (see its
-           own comment) to reserve #diagram-scroll's scrollbar row, and
-           the two heights share the same fixed vertical budget on a small
-           (~80x24) terminal: 22 rows available for #main-row +
-           #events-panel combined (24 - 1 header - 1 footer). 17 + 6 = 23
-           overflows that budget by 1 row, which clipped #events-panel's
-           own bottom border in exactly the same way the pre-scrolling
-           diagram used to clip -- confirmed by rendering a scroll-forcing
-           trace at 80x24 during Slice 1 of the scrollable-diagram work.
-           17 + 5 = 22 fits exactly, same zero-slack pattern as before. */
+        /* Static fallback (3 messages) for the brief window before
+           on_mount's _apply_events_panel_height runs -- kept at the old
+           safe value rather than the taller EVENTS_PANEL_TALL_HEIGHT so a
+           short (~80x24) terminal is never even momentarily asked to fit
+           #main-row's 17-row floor (see #main-row's own comment) plus a
+           7-row feed in a 22-row budget (24 - 1 header - 1 footer). Past
+           that first frame, height is set in Python per-resize between
+           EVENTS_PANEL_SHORT_HEIGHT (this value) and
+           EVENTS_PANEL_TALL_HEIGHT (5 messages, on terminals tall enough
+           per MIN_HEIGHT_FOR_TALL_FEED) -- see both constants' own comment
+           for the exact budget math. */
         height: 5;
         border: round #1f3d32;
         background: #080c0a;
@@ -1385,6 +1407,7 @@ class LiveApp(App):
 
     def on_resize(self, event: events.Resize) -> None:
         self._apply_inspector_visibility(event.size.width)
+        self._apply_events_panel_height(event.size.height)
 
     def _apply_inspector_visibility(self, width: int) -> None:
         try:
@@ -1392,6 +1415,15 @@ class LiveApp(App):
         except Exception:
             return
         panel.display = width >= MIN_WIDTH_FOR_INSPECTOR
+
+    def _apply_events_panel_height(self, height: int) -> None:
+        try:
+            panel = self.query_one("#events-panel")
+        except Exception:
+            return
+        panel.styles.height = (
+            EVENTS_PANEL_TALL_HEIGHT if height >= MIN_HEIGHT_FOR_TALL_FEED else EVENTS_PANEL_SHORT_HEIGHT
+        )
 
     async def on_mount(self) -> None:
         # Pushed first, before anything else in this method, and awaited
