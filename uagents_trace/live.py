@@ -1499,10 +1499,17 @@ def _star_link_text(*, celebration_frame: int | None = None) -> Text:
     click detection (`star_link_rows`), which is what actually drives the
     celebration; a terminal's native OSC 8 handling firing (or not)
     doesn't affect it either way.
+
+    The label is flanked by a star on both sides -- a plain "★ Star
+    uAgents on GitHub" read as a footnote next to the rest of the panel;
+    bracketing it (still bold, still the one vivid green) is what makes it
+    read as a call to action instead. `_build_empty_state_text` gives the
+    whole two-line block extra vertical room on top of that, so it doesn't
+    look cramped against the hint above or the stats below.
     """
     text = Text(justify="center")
     if celebration_frame is None:
-        text.append("★ Star uAgents on GitHub", style=Style(bold=True, color=GREEN, link=STAR_URL))
+        text.append("★  Star uAgents on GitHub  ★", style=Style(bold=True, color=GREEN, link=STAR_URL))
     else:
         glyphs = _CELEBRATION_GLYPHS[celebration_frame % len(_CELEBRATION_GLYPHS)]
         color = GREEN if celebration_frame % 2 == 0 else WARN
@@ -1533,15 +1540,15 @@ def _build_empty_state_text(
     order, when they don't all fit (logo and star link are never dropped).
 
     Deliberate, consistent vertical rhythm rather than stacked text: one
-    blank line between the logo/hint/star-link group's own pieces and
-    between each stat block, and *two* blank lines (a clearly bigger gap)
-    where the "action" area (hint + star link) hands off to the "stats"
-    area -- everything above that gap is about what to *do*, everything
-    below it is read-only data, and the gap is what tells you that's
-    happening. Each block costs `header_gap + len(content_lines)` rows (a
-    blank separator, the header itself, then its own content lines, all at
-    a consistent header+indented-content shape); a block is included only
-    if adding it wouldn't push the total past `available_height`.
+    blank line between the logo and the hint, *two* blank lines around the
+    star link -- giving it clear breathing room as the one actionable
+    thing in the empty state, both above (separating it from the hint) and
+    below (separating it from the read-only stats) -- and one blank line
+    between each stat block after that. Each block costs `header_gap +
+    len(content_lines)` rows (a blank separator, the header itself, then
+    its own content lines, all at a consistent header+indented-content
+    shape); a block is included only if adding it wouldn't push the total
+    past `available_height`.
 
     `celebration_frame`, if not `None`, is passed straight through to
     `_star_link_text` -- it overlays a brief flash on just that line, so
@@ -1559,7 +1566,7 @@ def _build_empty_state_text(
     text.append_text(_empty_state_logo_text(logo_phase, fade_step=logo_fade_step, sweep_row=logo_sweep_row))
     text.append("\n\n")
     text.append(INSPECTOR_EMPTY_HINT, style="dim")
-    text.append("\n\n")
+    text.append("\n\n\n")
 
     star_start_row = text.plain.count("\n")
     text.append_text(_star_link_text(celebration_frame=celebration_frame))
