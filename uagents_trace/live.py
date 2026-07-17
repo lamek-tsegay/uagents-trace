@@ -13,7 +13,7 @@ what happened to a given trace.
 import time
 from collections import Counter, deque
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from rich.style import Style
 from rich.text import Text
@@ -50,13 +50,26 @@ from .wizard import ViewMode, WatchSetup
 POLL_SECONDS = 3.0
 # Pending-indicator blink — slower than poll so the diagram is not constantly redrawing.
 PULSE_SECONDS = 1.5
-# The empty-state logo shimmer's own, much faster clock (see
-# _shimmer_logo_text / LiveApp._shimmer_tick) -- riding PULSE_SECONDS made
-# a full 12-row sweep take ~18s and read as barely moving. Only ticks while
-# the empty state is actually showing (LiveApp._start_shimmer_timer/
-# _stop_shimmer_timer), so it doesn't burn cycles once an agent is
-# selected.
+# The empty-state logo's fast per-row cadence, reused by two different
+# things (see LiveApp._logo_fade_in_tick and ._shimmer_sweep_tick): it used
+# to drive a *continuous* sweep on its own repeating interval, but riding
+# it non-stop made the logo the busiest thing on screen for no reason --
+# now it only runs in two short bursts: once for the fade-in, then again
+# for ~1.8s every SHIMMER_PERIOD_SECONDS.
 SHIMMER_INTERVAL_SECONDS = 0.15
+# How long after the splash screen is confirmed gone (see
+# LiveApp._on_screen_change) before the logo starts appearing -- a
+# deliberate beat, not a jump-cut from one animation straight into
+# another. See PROBLEM 1 in the commit/PR this constant was added for.
+LOGO_APPEAR_DELAY_SECONDS = 0.3
+# Total fade-in duration once the logo starts appearing, stepped at
+# FADE_STEPS granularity (the splash's own fade resolution, reused rather
+# than inventing a second one) -- LOGO_FADE_IN_STEP_SECONDS is defined
+# further down, right after FADE_STEPS itself.
+LOGO_FADE_IN_SECONDS = 0.6
+# How often the resting logo does one shimmer sweep -- static full-green
+# the rest of the time, not a continuous animation.
+SHIMMER_PERIOD_SECONDS = 10.0
 MAX_EVENTS = 15
 MAX_TRACE_LIST = 25
 TRACE_WIDGET_PREFIX = "trace-"
@@ -1041,6 +1054,9 @@ SPLASH_BG = "#0a0f0d"
 # just via discrete recoloring instead of a continuous opacity blend.
 FADE_STEPS = 12
 SPLASH_FADE_STEP_SECONDS = SPLASH_FADE_SECONDS / FADE_STEPS
+# The empty-state logo's fade-in step duration -- see LOGO_FADE_IN_SECONDS's
+# own comment for why this rides FADE_STEPS instead of a separate constant.
+LOGO_FADE_IN_STEP_SECONDS = LOGO_FADE_IN_SECONDS / FADE_STEPS
 
 
 def _hex_to_rgb(color: str) -> tuple[int, int, int]:
@@ -1391,33 +1407,60 @@ class SplashScreen(Screen):
 _SHIMMER_NEAR = 4
 _SHIMMER_FAR = 8
 
+LogoPhase = Literal["hidden", "fading_in", "resting", "sweeping"]
 
-def _shimmer_logo_text(tick: int) -> Text:
-    """The hero wordmark with a bright band swept down it, one row per
-    `tick` -- `LiveApp._shimmer_tick_count`, advanced by its own dedicated,
-    fast `set_interval` (`SHIMMER_INTERVAL_SECONDS`), not the ~1.5s pulse
-    tick everything else in the live TUI shares. A full sweep at one row
-    per *pulse* tick took ~18s and read as barely moving; this needs its
-    own faster clock to read as continuous motion instead. Wraps back to
-    row 0 after the last row (treating the rows as circular, so the sweep
-    loops smoothly instead of jumping back to the top). The center row of
-    the band renders at full brightness, its two neighbors a medium shade,
-    everything else dim -- deliberately a clearly-visible "scanning"
-    shimmer, not a subtle one-step flicker, per "playful = noticeable".
+
+def _empty_state_logo_text(phase: LogoPhase, *, fade_step: int, sweep_row: int) -> Text:
+    """The empty-state hero wordmark, rendered according to its current
+    appearance phase (see `LiveApp._logo_phase` for the state machine that
+    drives this):
+
+      "hidden"    -- the splash screen is still up, or the post-splash
+                      delay (LOGO_APPEAR_DELAY_SECONDS) hasn't elapsed yet.
+                      Blank rows, not nothing -- the SAME row count as
+                      every other phase, so the star link/stats below
+                      never reflow once the logo actually appears.
+      "fading_in" -- ramping from background color up to full brightness,
+                      uniformly across every row, over LOGO_FADE_IN_SECONDS.
+                      `fade_step` counts DOWN from FADE_STEPS (background)
+                      to 0 (full brightness), reusing the splash's own
+                      _HERO_FADE_COLORS ramp rather than a second one.
+      "resting"   -- static, full brightness. The logo's steady state
+                      between shimmer sweeps -- most of the time.
+      "sweeping"  -- one bright band swept down the logo, centered on
+                      `sweep_row`, circularly (so the sweep loops smoothly
+                      rather than jumping back to the top mid-pass). This
+                      used to be a continuous, always-on animation; now it
+                      only happens once per SHIMMER_PERIOD_SECONDS (see
+                      `LiveApp._trigger_shimmer_sweep`), reusing this exact
+                      per-row rendering for the one sweep it does.
+
+    Splitting "the splash might still be fading" from "the logo's own
+    animation" like this is the fix for the two colliding: the empty state
+    (built regardless of the splash, since `LiveApp._bootstrap` doesn't
+    wait for it -- see `on_mount`'s own comment) simply has nothing to draw
+    here until the splash is confirmed gone.
     """
     rows = len(_HERO_LINES_PADDED)
-    center = tick % rows
     text = Text(justify="center")
     for i, line in enumerate(_HERO_LINES_PADDED):
         if i:
             text.append("\n")
-        distance = min(abs(i - center), rows - abs(i - center))
-        if distance == 0:
+        if phase == "hidden":
+            text.append(" " * len(line))
+            continue
+        if phase == "fading_in":
+            color = _HERO_FADE_COLORS[fade_step]
+        elif phase == "sweeping":
+            distance = min(abs(i - sweep_row), rows - abs(i - sweep_row))
+            if distance == 0:
+                color = _HERO_FADE_COLORS[0]
+            elif distance == 1:
+                color = _HERO_FADE_COLORS[_SHIMMER_NEAR]
+            else:
+                color = _HERO_FADE_COLORS[_SHIMMER_FAR]
+        else:  # "resting"
             color = _HERO_FADE_COLORS[0]
-        elif distance == 1:
-            color = _HERO_FADE_COLORS[_SHIMMER_NEAR]
-        else:
-            color = _HERO_FADE_COLORS[_SHIMMER_FAR]
         text.append(line, style=f"bold {color}")
     return text
 
@@ -1477,14 +1520,17 @@ CELEBRATION_TICKS = 10
 def _build_empty_state_text(
     stats: SessionStats,
     *,
-    tick: int,
+    logo_phase: LogoPhase,
+    logo_fade_step: int,
+    logo_sweep_row: int,
     available_height: int,
     celebration_frame: int | None,
 ) -> tuple[Text, tuple[int, int] | None]:
-    """The inspector's empty-state content: animated logo, hint, star link,
-    then as many of the Session/Timing/Failures stat blocks as fit in
-    `available_height` (rows) -- dropped from the bottom, in that order,
-    when they don't all fit (logo and star link are never dropped).
+    """The inspector's empty-state content: the logo (see
+    `_empty_state_logo_text` for its `logo_*` phase/step/row params), hint,
+    star link, then as many of the Session/Timing/Failures stat blocks as
+    fit in `available_height` (rows) -- dropped from the bottom, in that
+    order, when they don't all fit (logo and star link are never dropped).
 
     Deliberate, consistent vertical rhythm rather than stacked text: one
     blank line between the logo/hint/star-link group's own pieces and
@@ -1510,7 +1556,7 @@ def _build_empty_state_text(
     -- for `InspectorCanvas` to hit-test clicks against.
     """
     text = Text(justify="center")
-    text.append_text(_shimmer_logo_text(tick))
+    text.append_text(_empty_state_logo_text(logo_phase, fade_step=logo_fade_step, sweep_row=logo_sweep_row))
     text.append("\n\n")
     text.append(INSPECTOR_EMPTY_HINT, style="dim")
     text.append("\n\n")
@@ -1828,21 +1874,41 @@ class LiveApp(App):
         # changes, since a selection from a different trace's agents
         # wouldn't mean anything here.
         self._selected_agent: str | None = None
-        # Monotonically increasing, driven by _shimmer_tick -- the
-        # empty-state logo shimmer's clock (see _shimmer_logo_text).
-        # Deliberately not reset; it only ever needs to keep advancing.
-        self._shimmer_tick_count = 0
-        # The shimmer's own dedicated timer handle (see
-        # _start_shimmer_timer/_stop_shimmer_timer) -- None whenever it
-        # isn't currently running, which is the signal both methods use to
-        # stay idempotent (starting an already-running timer, or stopping
-        # an already-stopped one, is a safe no-op either way).
-        self._shimmer_timer: Timer | None = None
+        # The empty-state logo's current appearance phase (see
+        # _empty_state_logo_text for what each value renders). Starts
+        # "hidden" -- nothing to show yet, the splash screen is still up
+        # -- and only ever moves forward: hidden -> fading_in -> resting
+        # -> [sweeping -> resting]*, never back. Set by
+        # _start_logo_appearance/_logo_fade_in_tick/_trigger_shimmer_sweep,
+        # kicked off by _on_screen_change once the splash is confirmed
+        # gone.
+        self._logo_phase: LogoPhase = "hidden"
+        # Fade-in progress, meaningful only in the "fading_in" phase --
+        # counts DOWN from FADE_STEPS (background color) to 0 (full
+        # brightness). See _logo_fade_in_tick.
+        self._logo_fade_step = FADE_STEPS
+        # Sweep position, meaningful only in the "sweeping" phase. See
+        # _trigger_shimmer_sweep/_shimmer_sweep_tick.
+        self._shimmer_sweep_row = 0
+        # The ~10s repeating timer that triggers one shimmer sweep each
+        # time it fires (see _trigger_shimmer_sweep) -- None whenever it
+        # isn't running, the same idempotency signal
+        # _start_shimmer_timer/_stop_shimmer_timer use as before.
+        self._shimmer_period_timer: Timer | None = None
+        # The fast per-row timer driving an in-progress sweep -- unlike
+        # _shimmer_period_timer (runs for as long as the empty state
+        # does), this one only runs between _trigger_shimmer_sweep and the
+        # sweep's own completion.
+        self._shimmer_sweep_timer: Timer | None = None
         # >0 while the star-link celebration flash is playing; sees a few
-        # shimmer ticks (see CELEBRATION_TICKS) then counts back down to 0,
+        # fast ticks (see CELEBRATION_TICKS) then counts back down to 0,
         # at which point the star link reverts to its normal look. Set by
-        # on_inspector_canvas_star_link_clicked.
+        # on_inspector_canvas_star_link_clicked, driven by
+        # _celebration_timer -- its own dedicated timer, since the
+        # continuous shimmer it used to piggyback on doesn't run
+        # continuously any more.
         self._celebration_ticks = 0
+        self._celebration_timer: Timer | None = None
 
     def _hub_hint(self) -> str | None:
         """Force hub-style rendering once the wizard has told us who the
@@ -1916,6 +1982,16 @@ class LiveApp(App):
         # one below it), so none of the calls after this need to change.
         await self.push_screen(SplashScreen())
 
+        # The empty-state logo (see _empty_state_logo_text) stays "hidden"
+        # until this fires with something other than SplashScreen -- i.e.
+        # until the splash pops itself off, whether by its own timers or a
+        # keypress (both left completely untouched; see _on_screen_change's
+        # own docstring for why a signal subscription rather than a hook on
+        # SplashScreen itself). Public Textual API (App.screen_change_
+        # signal), subscribed here rather than in __init__ because
+        # Signal.subscribe requires the node to already be running.
+        self.screen_change_signal.subscribe(self, self._on_screen_change)
+
         # Not "trace-uagents live" -- the splash screen (just dismissed)
         # already established the app's identity; naming it again here
         # would restate it a third time once combined with the sub-title
@@ -1943,34 +2019,127 @@ class LiveApp(App):
             self._render_events_log(flash=False)
         await self._refresh_display(pulse_only=True)
 
-    def _start_shimmer_timer(self) -> None:
-        """Starts the empty-state logo shimmer's own fast clock -- a no-op
-        if it's already running (see `_shimmer_timer`'s own comment).
-        Called every time the empty state renders (`_render_inspector_
-        empty_state`), which only ever happens while `_selected_agent is
-        None`, so this only ever runs during the empty state.
+    def _on_screen_change(self, screen: Screen) -> None:
+        """Fires (via the public `App.screen_change_signal`) on every
+        push/pop/switch -- ignores the push that puts `SplashScreen` on
+        top and reacts only the first time the app is back on *this*
+        screen instead, which happens exactly once: when the splash pops
+        itself off (`SplashScreen._finish`/`on_key`, both untouched).
+        Unsubscribes immediately after, since there's nothing else this
+        app ever pushes a screen for.
+
+        A signal subscription rather than a callback/hook added to
+        `SplashScreen` itself: the splash's own code and timing are
+        correct and explicitly out of scope here (see the module's
+        `SplashScreen` docstring) -- this only observes the outcome from
+        the outside, it doesn't change how or when the splash decides to
+        dismiss itself.
         """
-        if self._shimmer_timer is None:
-            self._shimmer_timer = self.set_interval(SHIMMER_INTERVAL_SECONDS, self._shimmer_tick)
+        if isinstance(screen, SplashScreen):
+            return
+        self.screen_change_signal.unsubscribe(self)
+        self.set_timer(LOGO_APPEAR_DELAY_SECONDS, self._start_logo_appearance)
+
+    def _start_logo_appearance(self) -> None:
+        """Fires once, `LOGO_APPEAR_DELAY_SECONDS` after the splash is
+        confirmed gone (see `_on_screen_change`) -- begins the empty-state
+        logo's fade-in. Kept as its own delayed step rather than starting
+        the fade the instant the splash pops, so there's a clean beat
+        between "splash gone" and "logo appears" instead of a jump-cut
+        from one animation straight into another.
+        """
+        self._logo_phase = "fading_in"
+        self._logo_fade_step = FADE_STEPS
+        self._refresh_empty_state_if_showing()
+        self.set_timer(LOGO_FADE_IN_STEP_SECONDS, self._logo_fade_in_tick)
+
+    def _logo_fade_in_tick(self) -> None:
+        self._logo_fade_step -= 1
+        self._refresh_empty_state_if_showing()
+        if self._logo_fade_step > 0:
+            self.set_timer(LOGO_FADE_IN_STEP_SECONDS, self._logo_fade_in_tick)
+        else:
+            self._logo_phase = "resting"
+            # Only meaningful once the logo has something to shimmer --
+            # _start_shimmer_timer itself still checks _logo_phase, but
+            # calling it here (rather than waiting for the next
+            # incidental render) starts the ~10s period promptly instead
+            # of whenever something unrelated happens to refresh next.
+            self._start_shimmer_timer()
+
+    def _refresh_empty_state_if_showing(self) -> None:
+        """Re-renders the empty state only if it's actually on screen
+        right now -- used by the logo's one-shot appear/fade-in sequence
+        and by the periodic shimmer sweep, both of which can have a tick
+        land while an agent is selected instead (the fade-in isn't tied to
+        selection at all, it's a one-time sequence following the splash;
+        a sweep tick already in flight when `_stop_shimmer_timer` runs
+        could still land a moment later). This just skips the pointless
+        update of a hidden widget when that happens, rather than
+        preventing it structurally.
+        """
+        if self._selected_agent is None:
+            self._render_inspector_empty_state()
+
+    def _start_shimmer_timer(self) -> None:
+        """Starts the ~10s periodic timer that triggers one shimmer sweep
+        (`_trigger_shimmer_sweep`) -- a no-op if it's already running, or
+        if the logo hasn't finished fading in yet (nothing to shimmer
+        while it's still hidden or fading in; `_logo_fade_in_tick` calls
+        this again itself the moment fading in completes). Called every
+        time the empty state renders (`_render_inspector_empty_state`),
+        which only ever happens while `_selected_agent is None`, so this
+        only ever runs during the empty state.
+        """
+        if self._logo_phase not in ("resting", "sweeping"):
+            return
+        if self._shimmer_period_timer is None:
+            self._shimmer_period_timer = self.set_interval(SHIMMER_PERIOD_SECONDS, self._trigger_shimmer_sweep)
 
     def _stop_shimmer_timer(self) -> None:
-        """Stops the shimmer clock -- called the moment an agent is
-        selected (`on_diagram_canvas_agent_clicked`), so it doesn't keep
-        ticking (and re-rendering the inspector 6-7x/second for nothing)
-        while a wholly different, non-animated view is showing.
+        """Stops the ~10s period timer, the fast per-row sweep timer if
+        one's mid-flight, and any in-progress click-celebration flash --
+        called the moment an agent is selected, so nothing keeps ticking
+        (and unconditionally re-rendering the empty state, see
+        `_render_inspector_empty_state`) behind a wholly different,
+        non-animated view. An interrupted sweep is abandoned rather than
+        resumed later: snapped back to "resting" so the logo reads as
+        settled if the empty state is shown again before the next period,
+        not frozen mid-band.
         """
-        if self._shimmer_timer is not None:
-            self._shimmer_timer.stop()
-            self._shimmer_timer = None
+        if self._shimmer_period_timer is not None:
+            self._shimmer_period_timer.stop()
+            self._shimmer_period_timer = None
+        if self._shimmer_sweep_timer is not None:
+            self._shimmer_sweep_timer.stop()
+            self._shimmer_sweep_timer = None
+            self._logo_phase = "resting"
+        if self._celebration_timer is not None:
+            self._celebration_timer.stop()
+            self._celebration_timer = None
+            self._celebration_ticks = 0
 
-    def _shimmer_tick(self) -> None:
-        self._shimmer_tick_count += 1
-        self._render_inspector_empty_state()
-        if self._celebration_ticks > 0:
-            # Decremented *after* the render above, so the frame just
-            # drawn (at whatever count was left) is CELEBRATION_TICKS'
-            # worth of real frames, not one fewer.
-            self._celebration_ticks -= 1
+    def _trigger_shimmer_sweep(self) -> None:
+        """Fired every `SHIMMER_PERIOD_SECONDS` (~10s) -- starts one sweep
+        down the logo, reusing the same fast per-row cadence
+        (`SHIMMER_INTERVAL_SECONDS`) the old continuous shimmer used, but
+        now just once per period instead of constantly.
+        """
+        self._logo_phase = "sweeping"
+        self._shimmer_sweep_row = 0
+        self._refresh_empty_state_if_showing()
+        self._shimmer_sweep_timer = self.set_interval(SHIMMER_INTERVAL_SECONDS, self._shimmer_sweep_tick)
+
+    def _shimmer_sweep_tick(self) -> None:
+        rows = len(_HERO_LINES_PADDED)
+        self._shimmer_sweep_row += 1
+        if self._shimmer_sweep_row >= rows:
+            # Swept every row -- rest until the next period, rather than
+            # looping straight into another pass.
+            self._shimmer_sweep_timer.stop()
+            self._shimmer_sweep_timer = None
+            self._logo_phase = "resting"
+        self._refresh_empty_state_if_showing()
 
     async def _bootstrap(self) -> None:
         self._alias_map = await get_alias_map(self.db_path)
@@ -2198,15 +2367,17 @@ class LiveApp(App):
         return max(scroll.size.height - 4, 0)
 
     def _render_inspector_empty_state(self) -> None:
-        """(Re)draws the inspector's empty-state content -- logo shimmer,
+        """(Re)draws the inspector's empty-state content -- logo (hidden,
+        fading in, resting, or mid-shimmer-sweep -- see `_logo_phase`),
         session stats, star link, and (localized to just the star link's
         own line, see `_star_link_text`) any in-progress click-celebration
         flash. Called from every `_refresh_display` branch where
-        `_selected_agent` is `None`, plus every shimmer tick, so the logo
-        keeps animating; never called while an agent IS selected, since
-        nothing in that view is time-driven. Also where the shimmer's own
-        timer gets (re)started -- see `_start_shimmer_timer`'s own
-        docstring for why that's safe to call unconditionally here.
+        `_selected_agent` is `None`, plus every logo/shimmer/celebration
+        tick, so those keep animating; never called while an agent IS
+        selected, since nothing in that view is time-driven. Also where
+        the ~10s shimmer period timer gets (re)started -- see
+        `_start_shimmer_timer`'s own docstring for why that's safe to call
+        unconditionally here.
         """
         self._start_shimmer_timer()
 
@@ -2218,7 +2389,9 @@ class LiveApp(App):
         stats = _compute_session_stats(list(self._trace_rollup_cache.values()))
         text, star_link_rows = _build_empty_state_text(
             stats,
-            tick=self._shimmer_tick_count,
+            logo_phase=self._logo_phase,
+            logo_fade_step=self._logo_fade_step,
+            logo_sweep_row=self._shimmer_sweep_row,
             available_height=self._inspector_panel_height(),
             celebration_frame=celebration_frame,
         )
@@ -2226,8 +2399,22 @@ class LiveApp(App):
         inspector.star_link_rows = star_link_rows
 
     def on_inspector_canvas_star_link_clicked(self, message: InspectorCanvas.StarLinkClicked) -> None:
+        """Starts the click-celebration flash -- its own dedicated timer
+        (see `_celebration_timer`'s comment in `__init__`), since the
+        continuous fast shimmer it used to piggyback on no longer runs
+        continuously.
+        """
         self._celebration_ticks = CELEBRATION_TICKS
         self._render_inspector_empty_state()
+        if self._celebration_timer is None:
+            self._celebration_timer = self.set_interval(SHIMMER_INTERVAL_SECONDS, self._celebration_tick)
+
+    def _celebration_tick(self) -> None:
+        self._celebration_ticks -= 1
+        self._render_inspector_empty_state()
+        if self._celebration_ticks <= 0:
+            self._celebration_timer.stop()
+            self._celebration_timer = None
 
     async def _refresh_display(self, *, pulse_only: bool = False) -> None:
         content = self.query_one("#diagram-content", DiagramCanvas)

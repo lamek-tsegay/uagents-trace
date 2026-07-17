@@ -286,9 +286,19 @@ class InspectorClickToRevealTests(unittest.TestCase):
                 widget = app.query_one("#inspector-content", InspectorCanvas)
                 self.assertIsNotNone(widget.star_link_rows)
 
-                # The shimmer's own fast timer is running while the empty
-                # state is showing -- it must not sit idle.
-                self.assertIsNotNone(app._shimmer_timer)
+                # Right after boot, the logo is still "hidden" -- it only
+                # starts appearing LOGO_APPEAR_DELAY_SECONDS after the
+                # splash is confirmed gone (see LiveApp._on_screen_change/
+                # _start_logo_appearance), and that appear-timer is muted
+                # in tests (see conftest.py) so it never fires here. The
+                # ~10s shimmer period timer only starts once the logo has
+                # finished fading in (_logo_fade_in_tick -> "resting"), so
+                # simulate that arrival directly rather than waiting on
+                # real timers, then confirm the period timer is running.
+                self.assertEqual(app._logo_phase, "hidden")
+                app._logo_phase = "resting"
+                app._render_inspector_empty_state()
+                self.assertIsNotNone(app._shimmer_period_timer)
 
         asyncio.run(run())
 
@@ -306,6 +316,13 @@ class InspectorClickToRevealTests(unittest.TestCase):
             # for the drop-order case).
             async with app.run_test(size=(240, 62)) as pilot:
                 await _boot(pilot)
+                # Get the shimmer's ~10s period timer running for real (see
+                # the matching comment in test_empty_state_before_any_click)
+                # so this test actually proves a running timer gets stopped,
+                # not just that it stays None.
+                app._logo_phase = "resting"
+                app._render_inspector_empty_state()
+                self.assertIsNotNone(app._shimmer_period_timer)
                 await _click_agent(pilot, app, "sub2")
 
                 plain = self._inspector_plain(app)
@@ -341,10 +358,11 @@ class InspectorClickToRevealTests(unittest.TestCase):
                 scroll = app.query_one("#inspector-scroll", VerticalScroll)
                 self.assertNotIn("inspector-empty", scroll.classes)
 
-                # Leaving the empty state stops the shimmer timer -- it
-                # shouldn't keep ticking (and re-rendering the inspector
-                # several times a second) behind an agent's static detail.
-                self.assertIsNone(app._shimmer_timer)
+                # Leaving the empty state stops both shimmer timers -- they
+                # shouldn't keep ticking (and re-rendering the inspector)
+                # behind an agent's static detail.
+                self.assertIsNone(app._shimmer_period_timer)
+                self.assertIsNone(app._shimmer_sweep_timer)
 
         asyncio.run(run())
 

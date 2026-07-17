@@ -25,9 +25,9 @@ from uagents_trace.live import (
     _append_session_footer,
     _build_empty_state_text,
     _compute_session_stats,
+    _empty_state_logo_text,
     _failures_block_lines,
     _session_block_lines,
-    _shimmer_logo_text,
     _star_link_text,
     _timing_block_lines,
     _truncate,
@@ -201,7 +201,9 @@ class EmptyStateLayoutTests(unittest.TestCase):
 
     def test_tall_terminal_shows_every_block(self):
         stats = self._stats_with_all_blocks_populated()
-        text, star_link_rows = _build_empty_state_text(stats, tick=0, available_height=100, celebration_frame=None)
+        text, star_link_rows = _build_empty_state_text(
+            stats, logo_phase="resting", logo_fade_step=0, logo_sweep_row=0, available_height=100, celebration_frame=None
+        )
         plain = text.plain
         self.assertIn("Session", plain)
         self.assertIn("Timing", plain)
@@ -210,7 +212,9 @@ class EmptyStateLayoutTests(unittest.TestCase):
 
     def test_short_terminal_keeps_logo_and_link_drops_all_blocks(self):
         stats = self._stats_with_all_blocks_populated()
-        text, star_link_rows = _build_empty_state_text(stats, tick=0, available_height=1, celebration_frame=None)
+        text, star_link_rows = _build_empty_state_text(
+            stats, logo_phase="resting", logo_fade_step=0, logo_sweep_row=0, available_height=1, celebration_frame=None
+        )
         plain = text.plain
         self.assertIn(INSPECTOR_EMPTY_HINT, plain)
         self.assertIn("Star uAgents on GitHub", plain)
@@ -223,7 +227,9 @@ class EmptyStateLayoutTests(unittest.TestCase):
     def test_medium_terminal_drops_from_the_bottom_failures_first(self):
         stats = self._stats_with_all_blocks_populated()
         # Enough room for the logo/link/hint plus exactly one stat block.
-        logo_only_text, _ = _build_empty_state_text(stats, tick=0, available_height=1, celebration_frame=None)
+        logo_only_text, _ = _build_empty_state_text(
+            stats, logo_phase="resting", logo_fade_step=0, logo_sweep_row=0, available_height=1, celebration_frame=None
+        )
         base_rows = logo_only_text.plain.count("\n") + 1
         # 3, not 2 -- the first block (Session) pays the bigger "action ->
         # stats" gap (2 blank lines) rather than the 1-blank-line gap
@@ -231,7 +237,12 @@ class EmptyStateLayoutTests(unittest.TestCase):
         session_cost = 3 + len(_session_block_lines(stats))
 
         text, _ = _build_empty_state_text(
-            stats, tick=0, available_height=base_rows + session_cost, celebration_frame=None
+            stats,
+            logo_phase="resting",
+            logo_fade_step=0,
+            logo_sweep_row=0,
+            available_height=base_rows + session_cost,
+            celebration_frame=None,
         )
         plain = text.plain
         self.assertIn("Session", plain)
@@ -243,9 +254,11 @@ class EmptyStateLayoutTests(unittest.TestCase):
         # logo and every stat block must still be there during the flash --
         # only the star link's own clickable label is replaced.
         stats = self._stats_with_all_blocks_populated()
-        normal_text, _ = _build_empty_state_text(stats, tick=0, available_height=100, celebration_frame=None)
+        normal_text, _ = _build_empty_state_text(
+            stats, logo_phase="resting", logo_fade_step=0, logo_sweep_row=0, available_height=100, celebration_frame=None
+        )
         celebrating_text, star_link_rows = _build_empty_state_text(
-            stats, tick=0, available_height=100, celebration_frame=0
+            stats, logo_phase="resting", logo_fade_step=0, logo_sweep_row=0, available_height=100, celebration_frame=0
         )
         plain = celebrating_text.plain
 
@@ -268,12 +281,43 @@ class EmptyStateLayoutTests(unittest.TestCase):
 
 
 class ShimmerAndCelebrationTests(unittest.TestCase):
+    """_empty_state_logo_text's four phases (see LogoPhase): "hidden" while
+    the splash is still up, "fading_in" as it steps from dim to full green,
+    "resting" static full-brightness the vast majority of the time, and
+    "sweeping" for the ~1.8s, once-every-~10s shimmer pass (see
+    SHIMMER_PERIOD_SECONDS) -- the periodic replacement for what used to be
+    a continuous shimmer.
+    """
+
+    def test_hidden_phase_renders_blank_rows_same_row_count_as_resting(self):
+        # Same footprint as every other phase (nothing shifts around when
+        # the logo appears) -- just nothing drawn in it yet.
+        hidden = _empty_state_logo_text("hidden", fade_step=0, sweep_row=0)
+        resting = _empty_state_logo_text("resting", fade_step=0, sweep_row=0)
+        self.assertEqual(hidden.plain.count("\n"), resting.plain.count("\n"))
+        self.assertEqual(hidden.plain.strip(), "")
+
+    def test_fading_in_phase_uses_one_uniform_color_from_fade_step(self):
+        from uagents_trace.live import _HERO_FADE_COLORS
+
+        for step in range(len(_HERO_FADE_COLORS)):
+            text = _empty_state_logo_text("fading_in", fade_step=step, sweep_row=0)
+            for run in text.spans:
+                self.assertIn(_HERO_FADE_COLORS[step], run.style)
+
+    def test_resting_phase_is_uniformly_full_brightness(self):
+        from uagents_trace.live import _HERO_FADE_COLORS
+
+        text = _empty_state_logo_text("resting", fade_step=0, sweep_row=0)
+        for run in text.spans:
+            self.assertIn(_HERO_FADE_COLORS[0], run.style)
+
     def test_shimmer_center_row_is_brightest(self):
         from uagents_trace.live import _HERO_FADE_COLORS, _HERO_LINES_PADDED
 
         rows = len(_HERO_LINES_PADDED)
         for tick in range(rows):
-            text = _shimmer_logo_text(tick)
+            text = _empty_state_logo_text("sweeping", fade_step=0, sweep_row=tick)
             center_line = text.plain.split("\n")[tick]
             style_at_center = next(
                 run.style for run in text.spans if run.start <= text.plain.index(center_line) < run.end
@@ -281,11 +325,18 @@ class ShimmerAndCelebrationTests(unittest.TestCase):
             self.assertIn(_HERO_FADE_COLORS[0], style_at_center)
 
     def test_shimmer_wraps_around_circularly(self):
-        # tick == rows should land back on row 0, same as tick == 0.
+        # sweep_row == rows should land back on row 0, same as sweep_row ==
+        # 0 -- the distance formula is circular by construction (see
+        # _empty_state_logo_text), even though in practice a real sweep
+        # never reaches sweep_row == rows: _shimmer_sweep_tick stops the
+        # fast timer and flips back to "resting" the instant it would.
         from uagents_trace.live import _HERO_LINES_PADDED
 
         rows = len(_HERO_LINES_PADDED)
-        self.assertEqual(_shimmer_logo_text(0).plain, _shimmer_logo_text(rows).plain)
+        self.assertEqual(
+            _empty_state_logo_text("sweeping", fade_step=0, sweep_row=0).plain,
+            _empty_state_logo_text("sweeping", fade_step=0, sweep_row=rows).plain,
+        )
 
     def test_celebration_alternates_color_by_frame_parity(self):
         even = _star_link_text(celebration_frame=0)
@@ -387,7 +438,9 @@ class SessionFooterTests(unittest.TestCase):
         # Same computation, same styling, in both surfaces -- switching
         # selection must not feel like two different panels.
         stats = self._stats_with_all_blocks_populated()
-        empty_text, _ = _build_empty_state_text(stats, tick=0, available_height=100, celebration_frame=None)
+        empty_text, _ = _build_empty_state_text(
+            stats, logo_phase="resting", logo_fade_step=0, logo_sweep_row=0, available_height=100, celebration_frame=None
+        )
         footer_text = Text()
         _append_session_footer(footer_text, stats, available_height=100)
         for line in _session_block_lines(stats) + _timing_block_lines(stats) + _failures_block_lines(stats):
