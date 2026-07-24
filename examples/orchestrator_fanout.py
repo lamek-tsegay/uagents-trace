@@ -26,10 +26,10 @@ class Result(Model):
     job: str
 
 
-orchestrator = Agent(name="orchestrator", seed="uagents_trace_demo_orchestrator_seed")
-sub1 = Agent(name="sub1", seed="uagents_trace_demo_sub1_seed")
-sub2 = Agent(name="sub2", seed="uagents_trace_demo_sub2_seed")
-sub3 = Agent(name="sub3", seed="uagents_trace_demo_sub3_seed")
+orchestrator = Agent(name="orchestrator", seed="orch")
+sub1 = Agent(name="sub1", seed="sub1")
+sub2 = Agent(name="sub2", seed="sub2")
+sub3 = Agent(name="sub3", seed="sub3")
 
 # sub4 is never constructed as a live `Agent` or added to the Bureau, so this
 # address is well-formed but unreachable -- the dispatch to it will fail,
@@ -38,7 +38,7 @@ sub3 = Agent(name="sub3", seed="uagents_trace_demo_sub3_seed")
 # `two_agents.py`'s ghost address: constructing an `Agent` registers it with
 # the process-wide dispatcher immediately, which would make it resolve as a
 # local delivery instead of failing.
-SUB4_ADDRESS = Identity.from_seed("uagents_trace_demo_sub4_seed", 0).address
+SUB4_ADDRESS = Identity.from_seed("sub4", 0).address
 
 SUBAGENT_DELAYS = {
     sub1.address: 0.05,
