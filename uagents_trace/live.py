@@ -2385,7 +2385,18 @@ class LiveApp(App):
         the ~10s shimmer period timer gets (re)started -- see
         `_start_shimmer_timer`'s own docstring for why that's safe to call
         unconditionally here.
+
+        Guarded on `is_running`: the logo/shimmer/celebration timers that
+        call in here reschedule themselves independently of app lifecycle
+        (see `_logo_fade_in_tick`), so one can still be in flight -- already
+        handed to the event loop -- at the instant the app starts tearing
+        down. Without this check that tick lands after `#inspector-content`
+        is gone, and `query_one` raises `NoMatches` instead of harmlessly
+        no-op'ing.
         """
+        if not self.is_running:
+            return
+
         self._start_shimmer_timer()
 
         inspector = self.query_one("#inspector-content", InspectorCanvas)
