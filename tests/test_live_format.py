@@ -154,7 +154,7 @@ class LiveFormatTests(unittest.TestCase):
             span("orch", "sub2", payload_type="Hello", payload_summary="Hi John!", enqueued_at=0, acked_at=4),
         ]
         aliases = {"orch": "Orchestrator", "sub1": "SubAgent1", "sub2": "SubAgent2"}
-        tree = build_interaction_tree(spans, "orch")
+        tree, _ = build_interaction_tree(spans)
         diagram = build_hub_tree_diagram(tree, aliases)
         text = diagram.plain
         self.assertIn("Orchestrator", text)

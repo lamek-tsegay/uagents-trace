@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 from textual import events
-from textual.containers import HorizontalScroll, VerticalScroll
+from textual.containers import ScrollableContainer, VerticalScroll
 
 from uagents_trace.live import DiagramCanvas, INSPECTOR_EMPTY_HINT, STAR_URL, InspectorCanvas, LiveApp
 from uagents_trace.store import init_db, insert_span, set_alias
@@ -160,7 +160,7 @@ class InspectorScrollTests(unittest.TestCase):
 
         async def run():
             addrs, names = await _seed_hub_trace(self.db_path, long_payload_for=1)
-            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch", view_mode="linear")
             app = LiveApp(setup)
             async with app.run_test(size=(240, 45)) as pilot:
                 await _boot(pilot)
@@ -181,7 +181,7 @@ class InspectorScrollTests(unittest.TestCase):
 
         async def run():
             addrs, names = await _seed_hub_trace(self.db_path, long_payload_for=1)
-            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch", view_mode="linear")
             app = LiveApp(setup)
             async with app.run_test(size=(240, 45)) as pilot:
                 await _boot(pilot)
@@ -203,7 +203,7 @@ class InspectorScrollTests(unittest.TestCase):
 
         async def run():
             addrs, names = await _seed_hub_trace(self.db_path, long_payload_for=1)
-            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch", view_mode="linear")
             app = LiveApp(setup)
             async with app.run_test(size=(240, 45)) as pilot:
                 await _boot(pilot)
@@ -252,7 +252,7 @@ class InspectorClickToRevealTests(unittest.TestCase):
 
         async def run():
             addrs, names = await _seed_hub_trace(self.db_path)
-            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch", view_mode="linear")
             app = LiveApp(setup)
             async with app.run_test(size=(240, 45)) as pilot:
                 await _boot(pilot)
@@ -307,7 +307,7 @@ class InspectorClickToRevealTests(unittest.TestCase):
 
         async def run():
             addrs, names = await _seed_hub_trace(self.db_path, n_subagents=4)
-            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch", view_mode="linear")
             app = LiveApp(setup)
             # Taller than most tests in this file -- tall enough for the
             # per-agent detail *and* the full Session/Timing/Failures
@@ -371,7 +371,7 @@ class InspectorClickToRevealTests(unittest.TestCase):
 
         async def run():
             addrs, names = await _seed_hub_trace(self.db_path, n_subagents=4)
-            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch", view_mode="linear")
             app = LiveApp(setup)
             async with app.run_test(size=(240, 45)) as pilot:
                 await _boot(pilot)
@@ -392,7 +392,7 @@ class InspectorClickToRevealTests(unittest.TestCase):
 
         async def run():
             addrs, names = await _seed_hub_trace(self.db_path, n_subagents=3, fail_last=True)
-            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch", view_mode="linear")
             app = LiveApp(setup)
             async with app.run_test(size=(240, 45)) as pilot:
                 await _boot(pilot)
@@ -451,7 +451,7 @@ class InspectorClickToRevealTests(unittest.TestCase):
 
         async def run():
             addrs, names = await _seed_hub_trace(self.db_path, n_subagents=2)
-            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch", view_mode="linear")
             app = LiveApp(setup)
             async with app.run_test(size=(240, 45)) as pilot:
                 await _boot(pilot)
@@ -470,7 +470,7 @@ class InspectorClickToRevealTests(unittest.TestCase):
 
         async def run():
             addrs, names = await _seed_hub_trace(self.db_path, n_subagents=4)
-            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch", view_mode="linear")
             app = LiveApp(setup)
             # Short enough that the per-agent detail alone (Address +
             # Message + Timing + Delivery) doesn't leave room for the
@@ -496,7 +496,7 @@ class InspectorClickToRevealTests(unittest.TestCase):
 
         async def run():
             addrs, names = await _seed_hub_trace(self.db_path, trace_id="trace-a", n_subagents=3)
-            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch", view_mode="linear")
             app = LiveApp(setup)
             async with app.run_test(size=(240, 45)) as pilot:
                 await _boot(pilot)
@@ -577,7 +577,7 @@ class DiagramScrollClickTests(unittest.TestCase):
 
         async def run():
             addrs, names = await _seed_hub_trace(self.db_path, n_subagents=5)
-            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch", view_mode="linear")
             app = LiveApp(setup)
             # Narrow enough that a 5-agent diagram (natural floor ~125
             # cols) can't fit -- forces #diagram-scroll to actually scroll.
@@ -585,7 +585,7 @@ class DiagramScrollClickTests(unittest.TestCase):
                 await _boot(pilot)
 
                 content = app.query_one("#diagram-content", DiagramCanvas)
-                scroller = app.query_one("#diagram-scroll", HorizontalScroll)
+                scroller = app.query_one("#diagram-scroll", ScrollableContainer)
                 self.assertGreater(
                     scroller.max_scroll_x, 0, "diagram should overflow its viewport for this to be a real test"
                 )
@@ -624,12 +624,12 @@ class DiagramScrollClickTests(unittest.TestCase):
 
         async def run():
             addrs, names = await _seed_hub_trace(self.db_path, n_subagents=2)
-            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch", view_mode="linear")
             app = LiveApp(setup)
             async with app.run_test(size=(240, 45)) as pilot:
                 await _boot(pilot)
 
-                scroller = app.query_one("#diagram-scroll", HorizontalScroll)
+                scroller = app.query_one("#diagram-scroll", ScrollableContainer)
                 self.assertEqual(scroller.max_scroll_x, 0, "diagram should fit without scrolling at this width")
 
                 await _click_agent(pilot, app, "sub2")
@@ -652,13 +652,13 @@ class DiagramScrollClickTests(unittest.TestCase):
 
         async def run():
             addrs, names = await _seed_hub_trace(self.db_path, n_subagents=5)
-            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch", view_mode="linear")
             app = LiveApp(setup)
             async with app.run_test(size=(150, 45)) as pilot:
                 await _boot(pilot)
 
                 content = app.query_one("#diagram-content", DiagramCanvas)
-                scroller = app.query_one("#diagram-scroll", HorizontalScroll)
+                scroller = app.query_one("#diagram-scroll", ScrollableContainer)
                 self.assertGreater(scroller.max_scroll_x, 0)
 
                 # sub2's absolute on-screen position at the default
@@ -719,7 +719,7 @@ class InspectorVisibilityThresholdTests(unittest.TestCase):
 
         async def run():
             addrs, names = await _seed_hub_trace(self.db_path, trace_id=f"trace-{width}", n_subagents=2)
-            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch")
+            setup = WatchSetup(addresses=addrs, names=names, filter_only=False, db_path=self.db_path, orchestrator="orch", view_mode="linear")
             app = LiveApp(setup)
             async with app.run_test(size=(width, 45)) as pilot:
                 await _boot(pilot)

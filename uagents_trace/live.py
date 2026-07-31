@@ -20,7 +20,7 @@ from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, HorizontalScroll, Vertical, VerticalScroll
+from textual.containers import Horizontal, ScrollableContainer, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import Screen
 from textual.timer import Timer
@@ -37,13 +37,23 @@ from .network_canvas import (
     block_width,
     build_hub_hit_regions,
     build_hub_topology,
+    build_layered_hit_regions,
+    build_layered_topology,
     build_peer_hit_regions,
     build_peer_topology,
     format_ms,
 )
-from .shape import HUB, Hop, TraceState, TreeNode, build_hops, build_trace_state
+from .shape import HUB, Hop, TraceState, TreeNode, build_hops, build_overview_graph, build_trace_state, truncate_tree_message
 from .store import get_alias_map, get_recent_spans, get_trace_spans, list_traces, save_watch_config
 from .wizard import ViewMode, WatchSetup
+
+# `v` cycles through these in order. Overview first: it's the new default
+# (every participating agent as a box, one screen) and the answer to "what
+# happened" most people want first; tree next for exact causal depth/order
+# when the overview's collapsed replies and retry-dedup aren't enough
+# detail; linear last, the original hub-legs-only waterfall, kept for
+# whoever still wants it.
+VIEW_CYCLE: tuple[ViewMode, ...] = ("overview", "tree", "linear")
 
 # Poll SQLite for new spans; 3s keeps the UI calm without feeling laggy for
 # typical multi-agent round trips (often seconds, not milliseconds).
@@ -372,7 +382,7 @@ def _append_tree_children(
         continuation = "    " if is_last else "│   "
         label = display_name(child.agent, alias_map)
         tag = f"[{child.payload_type}] " if child.payload_type else ""
-        msg = f'"{child.message}"' if child.message else ""
+        msg = f'"{truncate_tree_message(child.message)}"' if child.message else ""
         detail = " ".join(p for p in (tag + msg, _node_status_label(child)) if p).strip()
         state = child.state or "pending"
         line = f"{prefix}{branch}{label}  {detail}".rstrip()
@@ -415,7 +425,7 @@ def _sub_title_for(setup: WatchSetup, view_mode: ViewMode, *, follow: bool) -> s
     (see `on_mount`) is kept short for the same reason, so the composed
     Header line (`title — sub_title`) doesn't restate it twice either.
     """
-    return "to follow latest trace: press f  ·  to pin a trace: click it  ·  to switch to tree diagram: press v"
+    return "to follow latest trace: press f  ·  to pin a trace: click it  ·  to cycle overview/tree/linear: press v"
 
 
 def _trace_matches_watch(trace: dict[str, Any], addresses: set[str] | None) -> bool:
@@ -954,6 +964,47 @@ INSPECTOR_EMPTY_HINT = "click an agent for details"
 # than duplicating them up here.
 
 
+def _tree_leg_for(agent: str, tree: TreeNode | None, spans: list[dict[str, Any]]) -> tuple[str, dict[str, Any]] | None:
+    """(caller, leg-shaped dict) for `agent`'s own most recent dispatch in
+    the causal tree -- the general-purpose fallback for any agent that
+    isn't one of the hub's own direct children (`state.legs`, from
+    `build_hub_legs`, only ever covers those). The overview diagram makes
+    every participating agent clickable, not just the hub's immediate
+    legs, so the inspector needs a way to find detail for the rest too.
+
+    Shaped to match what `build_hub_legs` would produce so `_hub_leg_detail`
+    can render it unchanged -- one rendering path, not a second one for
+    this fallback case. `dispatch_payload`/`dispatch_message` come from
+    the matching raw span (`_find_span`) rather than the tree node itself,
+    since `OverviewEdge` deliberately doesn't carry payload text (the
+    diagram's own "no payloads" requirement) -- that's the inspector's job.
+
+    If `agent` was dispatched to more than once (a retry), this reflects
+    its *most recent* occurrence, matching the overview box's own state;
+    the exact per-attempt breakdown remains in the tree view.
+    """
+    if tree is None:
+        return None
+    _, edges = build_overview_graph(tree)
+    incoming = None
+    for e in edges:
+        if e.dest == agent:
+            incoming = e
+    if incoming is None:
+        return None
+    dispatch = _find_span(spans, incoming.source, agent, "send")
+    return incoming.source, {
+        "subagent": agent,
+        "dispatch_payload": dispatch["payload_type"] if dispatch else None,
+        "dispatch_message": dispatch.get("payload_summary") if dispatch else None,
+        "dispatch_ms": None,
+        "state": incoming.state,
+        "reply_ms": None,
+        "latency_ms": incoming.latency_ms,
+        "reason": incoming.reason,
+    }
+
+
 def build_agent_inspector_text(
     agent: str,
     trace_id: str,
@@ -980,36 +1031,35 @@ def build_agent_inspector_text(
     text = Text()
     text.append(f"Session  {trace_id}\n\n", style=MUTED)
 
+    detail: Text | None = None
+
     if state.shape == HUB and state.hub:
         leg = next((leg for leg in state.legs if leg["subagent"] == agent), None)
-        if leg is None:
-            text.append("No detail for this agent in the current trace.", style="dim")
-        else:
-            text.append_text(_hub_leg_detail(leg, spans, state.hub, state.started_at, alias_map))
+        if leg is not None:
+            detail = _hub_leg_detail(leg, spans, state.hub, state.started_at, alias_map)
     else:
         outbound, reply = _latest_peer_round_trip(state.hops)
-        if outbound is None:
-            text.append("No detail for this agent in the current trace.", style="dim")
-        elif agent == outbound.source:
-            text.append_text(_peer_hop_detail(outbound, spans, state.started_at, alias_map))
-        elif reply is not None and agent == outbound.dest:
-            text.append_text(_peer_hop_detail(reply, spans, state.started_at, alias_map))
-        elif agent == outbound.dest:
+        if outbound is not None and agent == outbound.source:
+            detail = _peer_hop_detail(outbound, spans, state.started_at, alias_map)
+        elif outbound is not None and reply is not None and agent == outbound.dest:
+            detail = _peer_hop_detail(reply, spans, state.started_at, alias_map)
+        elif outbound is not None and agent == outbound.dest:
             # Outbound sent, no reply yet -- still show what we know about
             # the outbound leg (address/message/timing/delivery) rather
             # than nothing.
             name = display_name(agent, alias_map)
             src_name = display_name(outbound.source, alias_map)
-            text.append(f"… {name}\n\n", style=f"bold {WARN}")
-            text.append_text(_address_section([(src_name, outbound.source), (name, outbound.dest)]))
-            text.append("\n")
-            text.append_text(_message_section(_format_payload(outbound), outbound.protocol, outbound.detail))
-            text.append("\n")
+            detail = Text()
+            detail.append(f"… {name}\n\n", style=f"bold {WARN}")
+            detail.append_text(_address_section([(src_name, outbound.source), (name, outbound.dest)]))
+            detail.append("\n")
+            detail.append_text(_message_section(_format_payload(outbound), outbound.protocol, outbound.detail))
+            detail.append("\n")
             enq_rel = _relative_ms(outbound.enqueued_at, state.started_at)
-            text.append_text(_timing_section([("sent", enq_rel, None, None)], sent_at_ms=outbound.enqueued_at))
-            text.append("\n")
+            detail.append_text(_timing_section([("sent", enq_rel, None, None)], sent_at_ms=outbound.enqueued_at))
+            detail.append("\n")
             raw = _find_span(spans, outbound.source, outbound.dest, "send")
-            text.append_text(
+            detail.append_text(
                 _delivery_section(
                     raw.get("payload_size") if raw else None,
                     src_name,
@@ -1018,9 +1068,22 @@ def build_agent_inspector_text(
                     outbound.dest_registered,
                 )
             )
-            text.append("\n  waiting for reply…", style=WARN)
-        else:
-            text.append("No detail for this agent in the current trace.", style="dim")
+            detail.append("\n  waiting for reply…", style=WARN)
+
+    if detail is None:
+        # Neither the hub's own direct legs nor the latest peer hop cover
+        # this agent -- true for most of the overview diagram's boxes,
+        # which makes every participant clickable, not just a hub's
+        # immediate children. Fall back to the causal tree directly.
+        fallback = _tree_leg_for(agent, state.tree, spans)
+        if fallback is not None:
+            caller, leg = fallback
+            detail = _hub_leg_detail(leg, spans, caller, state.started_at, alias_map)
+
+    if detail is None:
+        text.append("No detail for this agent in the current trace.", style="dim")
+    else:
+        text.append_text(detail)
 
     _append_session_footer(text, session_stats, available_height)
     return text
@@ -1730,9 +1793,9 @@ class LiveApp(App):
            viewport -- reserved unconditionally here rather than only when
            scrolling is active, so a diagram that starts fitting and later
            grows past the viewport (more agents join the trace) doesn't
-           shift the whole layout by a row mid-session. Below this, the
-           diagram's bottom row clips against whatever's below it on
-           screen -- #diagram-col isn't vertically scrollable. #events-panel's
+           shift the whole layout by a row mid-session. Below this floor,
+           #diagram-scroll's own vertical scrollbar (see its comment below)
+           takes over rather than content clipping -- #events-panel's
            height is sized to still fit alongside this minimum on a small
            (~80x24) terminal. */
         min-height: 17;
@@ -1774,9 +1837,15 @@ class LiveApp(App):
     #diagram-scroll {
         width: 100%;
         height: 1fr;
-        /* Centers the diagram when it's narrower than the viewport;
-           inert (scroll position governs instead) when it's wider --
-           see DiagramCanvas/#diagram-content below. Moved here from
+        /* Centers the diagram on whichever axis it's smaller than the
+           viewport; inert (scroll position governs instead) on whichever
+           axis it's bigger -- see DiagramCanvas/#diagram-content below.
+           ScrollableContainer (not HorizontalScroll) specifically because
+           the tree view can be both wider AND taller than the viewport at
+           once (a real multi-level trace easily runs 70+ rows deep) --
+           HorizontalScroll's own vertical overflow just clips silently,
+           which is exactly the "quietly cut the tree down to fit"
+           behavior this view exists to not do. Moved here from
            #diagram-col now that #diagram-col holds a scroll container
            instead of the canvas directly. */
         align: center middle;
@@ -1947,7 +2016,7 @@ class LiveApp(App):
                 trace_list.border_title = "Traces — bar = speed (green→red)"
                 yield trace_list
                 with Vertical(id="diagram-col"):
-                    with HorizontalScroll(id="diagram-scroll"):
+                    with ScrollableContainer(id="diagram-scroll"):
                         yield DiagramCanvas("", id="diagram-content")
                 with Vertical(id="inspector-col"):
                     with VerticalScroll(id="inspector-scroll", classes="inspector-empty"):
@@ -2260,6 +2329,23 @@ class LiveApp(App):
         self._render_events_log(flash=False)
         await self._append_new_feed_events()
 
+    def _reset_diagram_scroll(self) -> None:
+        """Back to the top-left origin. `scroll_to(0, 0)` is always a valid
+        target regardless of the *new* content's bounds (unlike
+        `_center_on_hub`'s target_x below, which needs deferring past
+        `content.update()` so it isn't clamped against the *previous*
+        content's now-stale bounds) -- so this can run synchronously,
+        before `_refresh_display` -- and still land correctly underneath
+        whatever `_refresh_display` itself does afterwards (e.g.
+        `_center_on_hub` re-centering a star topology). Called on a trace
+        switch or a view-mode toggle, both of which invalidate whatever
+        scroll position applied to the *previous* content -- most
+        concretely, the star topology's hub-centered horizontal offset has
+        no meaning once `v` switches to the tree view, which left-anchors
+        its root instead.
+        """
+        self.query_one("#diagram-scroll", ScrollableContainer).scroll_to(x=0, y=0, animate=False)
+
     async def _select_trace(self, trace_id: str, *, follow: bool | None = None) -> None:
         if follow is not None:
             self._follow_latest = follow
@@ -2271,6 +2357,7 @@ class LiveApp(App):
         # anything for a different trace -- back to the empty-state hint
         # until the user clicks an agent in this one.
         self._selected_agent = None
+        self._reset_diagram_scroll()
         await self._reload_feed_for_active_trace()
         self.sub_title = _sub_title_for(self.setup, self.view_mode, follow=self._follow_latest)
         await self._refresh_display()
@@ -2339,8 +2426,13 @@ class LiveApp(App):
         if new_events or prev_latest != (self._trace_ids[0] if self._trace_ids else None):
             await self._refresh_display()
 
+    def _next_view_mode(self) -> ViewMode:
+        idx = VIEW_CYCLE.index(self.view_mode) if self.view_mode in VIEW_CYCLE else -1
+        return VIEW_CYCLE[(idx + 1) % len(VIEW_CYCLE)]
+
     async def action_cycle_view(self) -> None:
-        self.view_mode = "tree" if self.view_mode == "linear" else "linear"
+        self.view_mode = self._next_view_mode()
+        self._reset_diagram_scroll()
         self.sub_title = _sub_title_for(self.setup, self.view_mode, follow=self._follow_latest)
         await save_watch_config(
             self.db_path,
@@ -2458,9 +2550,23 @@ class LiveApp(App):
             self._render_inspector_empty_state()
             return
 
+        # Deliberately NOT filtered by self.addresses, unlike the trace
+        # list / rolling feed elsewhere in this class: `self.addresses`
+        # controls *which traces* count as "watched" (see
+        # _trace_matches_watch) and which individual hops surface in the
+        # cross-trace feed (_append_new_feed_events) -- both reasonable
+        # places to scope down to a few agents. But once a trace is
+        # selected for its own diagram/tree/rollup, dropping spans whose
+        # source *and* dest both fall outside that address set silently
+        # cuts the causal chain a surviving span's own parent_span_id
+        # still points into (e.g. gateway/parser/payment_gate, none of
+        # which are typically "watched" agents but all of which sit
+        # between the trace's true root and any watched agent) --
+        # build_interaction_tree then can't resolve those spans' ancestry
+        # and roots the tree at whatever's left, disagreeing with `show
+        # --view tree` on the same, unfiltered trace_id. A selected trace
+        # is one bounded, complete story; it always renders in full.
         spans = await get_trace_spans(self.db_path, self._active_trace_id)
-        if self.addresses:
-            spans = [s for s in spans if _span_in_watch(s, self.addresses)]
 
         state = build_trace_state(spans, hub_hint=self._hub_hint())
         self._trace_state = state
@@ -2479,19 +2585,40 @@ class LiveApp(App):
 
         if state.total == 0:
             topology = Text("Waiting for messages in this trace…", style="dim")
+        elif self.view_mode == "overview" and state.tree is not None:
+            # Whole-trace overview: one box per participating agent, one
+            # edge per logical call (shape.build_overview_graph already
+            # merged request/response and deduplicated retries -- this
+            # view exists specifically so all ~33 agents fit on screen at
+            # once, unlike the tree's one-node-per-hop depth). Built fresh
+            # each refresh from the same `state.tree` every other view
+            # reads -- no separate/parallel graph computation.
+            overview_nodes, overview_edges = build_overview_graph(state.tree)
+            overview_names = {n.agent: display_name(n.agent, self._alias_map) for n in overview_nodes}
+            topology = build_layered_topology(
+                overview_nodes,
+                overview_edges,
+                overview_names,
+                pulse=pulse,
+                selected=self._selected_agent,
+            )
+            hit_regions = build_layered_hit_regions(overview_nodes, overview_names)
+        elif self.view_mode == "tree" and state.tree is not None:
+            # The causal tree exists independent of `shape` (see
+            # shape.build_trace_state) -- available in tree view for any
+            # trace with real parentage, not just HUB-classified ones, so a
+            # deep multi_level pipeline still renders to full depth here.
+            topology = build_hub_tree_diagram(state.tree, self._alias_map)
         elif state.shape == HUB and state.hub:
-            if self.view_mode == "tree" and state.tree is not None:
-                topology = build_hub_tree_diagram(state.tree, self._alias_map)
-            else:
-                is_star_hub_topology = True
-                topology, hit_regions = _hub_diagram_pieces(
-                    state,
-                    self._alias_map,
-                    pulse=pulse,
-                    selected=self._selected_agent,
-                    available_width=available_width,
-                    available_height=available_height,
-                )
+            is_star_hub_topology = True
+            topology, hit_regions = _hub_diagram_pieces(
+                state,
+                self._alias_map,
+                pulse=pulse,
+                selected=self._selected_agent,
+                available_width=available_width,
+                available_height=available_height,
+            )
         else:
             topology, hit_regions = _peer_diagram_pieces(
                 state.hops,
@@ -2535,7 +2662,7 @@ class LiveApp(App):
                 # target_x against the *previous* (narrower or empty)
                 # bounds and silently no-op.
                 def _center_on_hub(x: int = target_x) -> None:
-                    self.query_one("#diagram-scroll", HorizontalScroll).scroll_to(x=x, animate=False)
+                    self.query_one("#diagram-scroll", ScrollableContainer).scroll_to(x=x, animate=False)
 
                 self.call_after_refresh(_center_on_hub)
 
