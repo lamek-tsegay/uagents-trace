@@ -14,9 +14,9 @@ import questionary
 from questionary import Style
 from rich.console import Console
 
-from .store import default_db_path, init_db, list_aliases, load_watch_config, save_watch_config, set_alias
+from .store import default_db_path, get_alias_map, init_db, list_aliases, load_watch_config, save_watch_config, set_alias
 
-ViewMode = Literal["linear", "tree"]
+ViewMode = Literal["linear", "tree", "overview"]
 
 ACCENT = "#34d399"
 MUTED = "#6b7280"
@@ -56,7 +56,7 @@ class WatchSetup:
     filter_only: bool
     db_path: str
     orchestrator: str | None = None
-    view_mode: ViewMode = "linear"
+    view_mode: ViewMode = "overview"
 
 
 def _looks_like_address(value: str) -> bool:
@@ -218,21 +218,35 @@ async def _restore_saved_setup(db_path: str, saved: dict) -> WatchSetup:
         filter_only=saved["filter_only"],
         db_path=db_path,
         orchestrator=saved.get("orchestrator"),
-        view_mode=saved.get("view_mode", "linear"),
+        view_mode=saved.get("view_mode", "overview"),
     )
 
 
-async def run_wizard(db_path: str | None = None) -> WatchSetup:
+async def run_wizard(db_path: str | None = None, *, force_setup: bool = False) -> WatchSetup:
+    """`force_setup=True` (the CLI's `--setup` flag) always runs the
+    interactive setup, even with a saved config on disk -- otherwise, a
+    saved config resumes automatically, no confirmation prompt. Resuming
+    used to ask "Resume with your previous agent setup? (Y/n)" every time;
+    for a setup that's already correct (the common case once it's been
+    used once) that's a keypress bought nothing -- worse on stage, where
+    minimal typing between "start the tool" and "the live diagram is up"
+    is the whole point. `--setup` is the escape hatch for when the saved
+    config genuinely needs to change.
+    """
     db_path = db_path or default_db_path()
     await init_db(db_path)
     saved = await load_watch_config(db_path)
 
     _print_header()
 
-    if saved and await _prompt_use_saved_setup():
+    if saved and not force_setup:
         return await _restore_saved_setup(db_path, saved)
+    if saved and force_setup:
+        console.print("[dim]--setup requested -- starting fresh (your previous config is still saved as a fallback).[/]")
 
     _print_section("Add agents")
+
+    existing_aliases = await get_alias_map(db_path)
 
     count = await _prompt_agent_count()
     addresses: set[str] = set()
@@ -248,15 +262,21 @@ async def run_wizard(db_path: str | None = None) -> WatchSetup:
         seed_or_addr = await _prompt_seed_or_address(i, orchestrator=is_orch)
         address = resolve_address(seed_or_addr)
 
-        default_name = "Orchestrator" if is_orch else (f"SubAgent{i - 1}" if count >= 2 else "Agent")
+        # Pre-fill with the address's existing display name, if it has one,
+        # rather than a generic placeholder that would silently rename it.
+        default_name = existing_aliases.get(address) or (
+            "Orchestrator" if is_orch else (f"SubAgent{i - 1}" if count >= 2 else "Agent")
+        )
         name = await _prompt_friendly_name(i, default=default_name)
 
         addresses.add(address)
         names[address] = name
         if i == 1:
             orchestrator = address
-        await set_alias(db_path, name, address)
+        warning = await set_alias(db_path, name, address)
         _print_done(f"{name} saved")
+        if warning:
+            console.print(f"  [yellow]⚠[/] [dim]{warning}[/]")
 
     filter_only = await _prompt_filter_only()
     await save_watch_config(db_path, list(addresses), filter_only, orchestrator)
@@ -270,5 +290,5 @@ async def run_wizard(db_path: str | None = None) -> WatchSetup:
         filter_only=filter_only,
         db_path=db_path,
         orchestrator=orchestrator,
-        view_mode="linear",
+        view_mode="overview",
     )
