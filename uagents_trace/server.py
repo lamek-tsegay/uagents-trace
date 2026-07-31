@@ -215,15 +215,25 @@ async def api_get_trace_hops(trace_id: str) -> dict:
 
 @app.get("/api/traces/{trace_id}/tree")
 async def api_get_trace_tree(trace_id: str) -> dict:
+    """The causal dispatch tree (see `shape.build_interaction_tree`), rooted
+    at the trace's real entry point and nested to whatever depth the data
+    has -- not gated on `shape == HUB` the way the linear hub-legs view is,
+    since a deep multi_level pipeline has a real tree too. `unparented`
+    holds anything that couldn't be reached from the root (see that
+    function's docstring) so the UI can render it in its own section
+    instead of it silently vanishing.
+    """
     db_path = default_db_path()
     spans = await get_trace_spans(db_path, trace_id)
     if not spans:
         raise HTTPException(status_code=404, detail="Trace not found")
-    shape, hub = classify_trace_shape(spans)
-    if shape != HUB or not hub:
-        raise HTTPException(status_code=404, detail="Trace is not hub-shaped")
-    tree = build_interaction_tree(spans, hub)
-    return tree_node_to_dict(tree)
+    tree, unparented = build_interaction_tree(spans)
+    if tree is None:
+        raise HTTPException(status_code=404, detail="No causal parentage recorded for this trace")
+    return {
+        "tree": tree_node_to_dict(tree),
+        "unparented": [tree_node_to_dict(n) for n in unparented],
+    }
 
 
 @app.get("/api/traces/{trace_id}/hub-legs")
@@ -250,8 +260,8 @@ async def api_list_aliases() -> list[dict]:
 
 @app.put("/api/aliases")
 async def api_set_alias(alias: AliasIn) -> dict:
-    await set_alias(default_db_path(), alias.name, alias.address)
-    return {"name": alias.name, "address": alias.address}
+    warning = await set_alias(default_db_path(), alias.name, alias.address)
+    return {"name": alias.name, "address": alias.address, "warning": warning}
 
 
 @app.delete("/api/aliases/{address}")

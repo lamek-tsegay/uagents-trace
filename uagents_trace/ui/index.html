@@ -323,10 +323,11 @@
       </div>
       <div id="panel-tree" class="view-panel hidden">
         <div class="help-line">
-          Fan-out tree: orchestrator at the root, sub-agents as branches. Branches stay open
-          while pending and show success when the reply arrives.
+          Causal dispatch tree, rooted at the trace's real entry point and nested to full
+          depth. Branches stay open while pending and show success when the reply arrives.
         </div>
         <div id="tree-content"></div>
+        <div id="tree-unparented"></div>
       </div>
     </div>
   </main>
@@ -384,11 +385,13 @@ async function renameAddr(addr) {
     if (name.trim() === "") {
       await fetch(`/api/aliases/${encodeURIComponent(addr)}`, { method: "DELETE" });
     } else {
-      await fetch("/api/aliases", {
+      const resp = await fetch("/api/aliases", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: name.trim(), address: addr }),
       });
+      const result = await resp.json();
+      if (result.warning) alert(result.warning);
     }
   } catch (e) {
     console.error("failed to save alias", e);
@@ -588,6 +591,20 @@ function renderLinearHub(hub, legs) {
   container.innerHTML = html;
 }
 
+// Passive tree listings show many nodes at once -- a raw payload_summary
+// can be a multi-thousand-character JSON blob, which makes the tree
+// unreadable. Matches shape.TREE_MESSAGE_LIMIT on the Python side; full
+// payloads stay available via the raw /api/traces/{id} endpoint, this only
+// trims what's shown inline per node.
+const TREE_MESSAGE_LIMIT = 160;
+
+function truncateForTree(text) {
+  if (!text) return text;
+  const collapsed = text.split(/\s+/).filter(Boolean).join(" ");
+  if (collapsed.length <= TREE_MESSAGE_LIMIT) return collapsed;
+  return `${collapsed.slice(0, TREE_MESSAGE_LIMIT).trimEnd()}… (+${text.length - TREE_MESSAGE_LIMIT} chars)`;
+}
+
 function renderTreeNode(node, depth = 0) {
   if (depth === 0) {
     return `<div class="tree-root">${addrChip(node.agent)}</div>` +
@@ -595,7 +612,7 @@ function renderTreeNode(node, depth = 0) {
   }
   const state = node.state || "pending";
   const tag = node.payload_type ? `[${node.payload_type}] ` : "";
-  const msg = node.message ? `"${node.message}"` : "";
+  const msg = node.message ? `"${truncateForTree(node.message)}"` : "";
   let status = "";
   if (state === "completed") status = `✓ ${fmtDuration(node.latency_ms)}`;
   else if (state === "failed") status = `✗ ${node.reason || "failed"}`;
@@ -609,9 +626,16 @@ function renderTreeNode(node, depth = 0) {
   return html;
 }
 
-function renderTree(tree) {
-  const container = document.getElementById("tree-content");
-  container.innerHTML = renderTreeNode(tree);
+function renderTree(tree, unparented) {
+  document.getElementById("tree-content").innerHTML = renderTreeNode(tree);
+  const unparentedEl = document.getElementById("tree-unparented");
+  if (!unparented || unparented.length === 0) {
+    unparentedEl.innerHTML = "";
+    return;
+  }
+  unparentedEl.innerHTML =
+    `<div class="help-line">UNPARENTED -- ${unparented.length} span(s) with no known cause:</div>` +
+    unparented.map((n) => renderTreeNode(n, 1)).join("");
 }
 
 async function selectTrace(traceId) {
@@ -649,11 +673,12 @@ async function refreshTraceDetail() {
       }
     } else if (detailView === "tree") {
       try {
-        const tree = await fetchJSON(`/api/traces/${selectedTraceId}/tree`);
-        renderTree(tree);
+        const data = await fetchJSON(`/api/traces/${selectedTraceId}/tree`);
+        renderTree(data.tree, data.unparented);
       } catch {
         document.getElementById("tree-content").innerHTML =
-          '<div class="view-unavailable">Tree view is only available for orchestrator fan-out traces (3+ agents, one hub dispatching to several sub-agents).</div>';
+          '<div class="view-unavailable">Tree view needs causal parentage (parent_span_id) -- not recorded for this trace.</div>';
+        document.getElementById("tree-unparented").innerHTML = "";
       }
     }
   } catch (e) {

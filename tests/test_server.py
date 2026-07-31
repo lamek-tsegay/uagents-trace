@@ -158,6 +158,24 @@ class ServerHopsApiTests(unittest.TestCase):
         resp = self.client.get("/api/traces/does-not-exist/hops")
         self.assertEqual(resp.status_code, 404)
 
+    def test_tree_endpoint_returns_tree_and_unparented_even_without_parentage(self):
+        # This seed data predates parent_span_id (no field set on any
+        # span), so the tree comes from the legacy busiest-source fallback
+        # (see shape.build_interaction_tree) -- the endpoint must still
+        # return 200 with the wrapped {tree, unparented} shape, not require
+        # shape == HUB the way the old hub-only-gated endpoint did.
+        resp = self.client.get(f"/api/traces/{self.trace_id}/tree")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("tree", data)
+        self.assertIn("unparented", data)
+        self.assertEqual(data["tree"]["agent"], ORCH)
+        self.assertEqual(data["unparented"], [])
+
+    def test_tree_endpoint_404s_for_unknown_trace(self):
+        resp = self.client.get("/api/traces/does-not-exist/tree")
+        self.assertEqual(resp.status_code, 404)
+
     def test_trace_list_is_enriched_with_fractional_rollup(self):
         resp = self.client.get("/api/traces")
         self.assertEqual(resp.status_code, 200)
