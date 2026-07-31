@@ -12,6 +12,7 @@ instead of inventing a parallel correlation scheme.
 """
 
 import asyncio
+import contextvars
 import functools
 import json
 import uuid
@@ -27,6 +28,16 @@ DEFAULT_TIMEOUT_SECONDS = 10
 _initialized_dbs: set[str] = set()
 
 F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
+
+# Set by `trace` to the receive span id of the handler currently executing
+# in this asyncio task, read by `traced_send` to record which receive
+# *caused* a given send -- see `traced_send`'s and `trace`'s docstrings.
+# `asyncio.create_task` copies the current context at creation time (see
+# `contextvars` docs), so a task spawned from inside a traced handler still
+# sees the parent's value; a task that *isn't* spawned from inside one (a
+# timer, a detached background job) sees the default, None -- an honest
+# "unknown", not a guess.
+_current_span: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("current_span", default=None)
 
 
 async def _ensure_db(db_path: str) -> None:
@@ -121,6 +132,11 @@ async def traced_send(
 
     Usage: `await traced_send(ctx, dest, msg)` in place of
     `await ctx.send(dest, msg)`.
+
+    The recorded span's `parent_span_id` is whatever `trace` last set
+    `_current_span` to in this asyncio task -- the receive span of the
+    handler that's dispatching this send, if any (`None` outside a traced
+    handler, e.g. a scenario client's opening message).
     """
     db_path = db_path or default_db_path()
     await _ensure_db(db_path)
@@ -150,6 +166,7 @@ async def traced_send(
             "detail": detail,
             "payload_summary": payload_summary(message),
             "direction": "send",
+            "parent_span_id": _current_span.get(),
         },
     )
 
@@ -190,6 +207,12 @@ def trace(handler: F) -> F:
     Placing `@trace` above `@agent.on_message(...)` registers the
     untraced handler and silently no-ops the wrapper, since uAgents captures
     the raw function by reference before `trace` ever sees it.
+
+    Sets `_current_span` to this receive span's id for the duration of the
+    handler call, so any `traced_send` made from inside `handler` -- or from
+    an `asyncio.create_task` spawned inside it, which copies the current
+    context at creation time -- records this span as its cause (see
+    `traced_send`).
     """
 
     @functools.wraps(handler)
@@ -224,11 +247,15 @@ def trace(handler: F) -> F:
             },
         )
 
+        token = _current_span.set(span_id)
         try:
-            result = await handler(ctx, sender, msg, *args, **kwargs)
-        except Exception as exc:
-            await update_span(db_path, span_id, state="dropped", acked_at=now_ms(), error=str(exc))
-            raise
+            try:
+                result = await handler(ctx, sender, msg, *args, **kwargs)
+            except Exception as exc:
+                await update_span(db_path, span_id, state="dropped", acked_at=now_ms(), error=str(exc))
+                raise
+        finally:
+            _current_span.reset(token)
 
         await update_span(db_path, span_id, state="delivered", acked_at=now_ms())
         return result
