@@ -29,6 +29,7 @@ from .shape import (
     build_hub_legs,
     build_interaction_tree,
     classify_trace_shape,
+    truncate_tree_message,
 )
 from .store import (
     default_db_path,
@@ -195,7 +196,7 @@ def _print_tree_children(node: TreeNode, alias_map: dict[str, str], color: bool,
         continuation = "    " if is_last else "│   "
         label = display_name(child.agent, alias_map)
         tag = f"[{child.payload_type}] " if child.payload_type else ""
-        msg = f'"{child.message}"' if child.message else ""
+        msg = f'"{truncate_tree_message(child.message)}"' if child.message else ""
         detail = " ".join(p for p in (tag + msg, _tree_status_label(child)) if p).strip()
         line = f" {prefix}{branch}{label}  {detail}".rstrip()
         state_code = ANSI.get(child.state or "pending", "37")
@@ -204,17 +205,40 @@ def _print_tree_children(node: TreeNode, alias_map: dict[str, str], color: bool,
             _print_tree_children(child, alias_map, color, prefix + continuation)
 
 
-def print_hub_tree(spans: list[dict[str, Any]], hub: str, alias_map: dict[str, str], color: bool) -> None:
-    """Fan-out tree: orchestrator root with sub-agents branching below."""
-    hub_label = display_name(hub, alias_map)
-    print(f"TREE {hub_label}\n")
-    tree = build_interaction_tree(spans, hub)
-    if not tree.children:
-        print("  Waiting for dispatch to sub-agents…")
-        print()
+def print_causal_tree(spans: list[dict[str, Any]], alias_map: dict[str, str], color: bool) -> None:
+    """Full causal dispatch tree, rooted at the trace's real entry point
+    (see `shape.build_interaction_tree`) -- nests to whatever depth the
+    data has, not just one level of fan-out. Anything that couldn't be
+    reached from that root (a NULL-parent span that isn't the true root, or
+    a receive with no matched send) prints in a separate, clearly marked
+    section instead of being silently dropped.
+    """
+    tree, unparented = build_interaction_tree(spans)
+    if tree is None:
+        print("(no causal parentage recorded for this trace -- older data, or nothing traced yet)\n")
         return
-    _print_tree_children(tree, alias_map, color)
-    print()
+
+    root_label = display_name(tree.agent, alias_map)
+    print(f"TREE {root_label}\n")
+    if not tree.children:
+        print("  Waiting for dispatch…")
+        print()
+    else:
+        _print_tree_children(tree, alias_map, color)
+        print()
+
+    if unparented:
+        print(f"UNPARENTED ({len(unparented)} span(s) with no known cause)\n")
+        for node in unparented:
+            label = display_name(node.agent, alias_map)
+            tag = f"[{node.payload_type}] " if node.payload_type else ""
+            msg = f'"{truncate_tree_message(node.message)}"' if node.message else ""
+            detail = " ".join(p for p in (tag + msg, _tree_status_label(node)) if p).strip()
+            line = f" - {label}  {detail}".rstrip()
+            print(colorize(line, ANSI.get(node.state or "pending", "37"), color))
+            if node.children:
+                _print_tree_children(node, alias_map, color, prefix="  ")
+        print()
 
 
 def print_payment(spans: list[dict[str, Any]], alias_map: dict[str, str], color: bool) -> None:
@@ -353,19 +377,26 @@ async def print_trace_detail(
         print(label)
     print()
 
+    # Additive, not a replacement: `protocols.py` only labels spans, it
+    # never changes which ones get rendered. A trace can be a payment trace
+    # *and* a hub/multi-level one at the same time (e.g. Launchpad's
+    # paid-tier runs always are), so the ladder is a supplementary view
+    # printed ahead of the normal waterfall below, not instead of it.
     if is_payment_trace(spans):
         print_payment(spans, alias_map, color)
+
+    if view == "tree":
+        # The causal tree nests to real depth regardless of shape (a deep,
+        # multi_level pipeline included) -- see shape.build_interaction_tree.
+        print_causal_tree(spans, alias_map, color)
         return
 
     shape, hub_agent = classify_trace_shape(spans)
     if shape == HUB:
-        if view == "tree":
-            print_hub_tree(spans, hub_agent, alias_map, color)
-        else:
-            print_hub(spans, hub_agent, alias_map, color)
+        print_hub(spans, hub_agent, alias_map, color)
     else:
         if shape == MULTI_LEVEL:
-            print("(multi-level trace, showing flat view)\n")
+            print("(multi-level trace, showing flat view -- pass --view tree for the full dispatch tree)\n")
         print_flat_spans(build_hops(spans), alias_map, color)
 
 
@@ -437,8 +468,10 @@ async def cmd_alias_add(args: argparse.Namespace) -> None:
         console.print("[red]Provide either an address or --seed.[/]")
         sys.exit(1)
 
-    await set_alias(db_path, args.name, address)
+    warning = await set_alias(db_path, args.name, address)
     console.print(f"[green]✓[/] {args.name} -> {address}")
+    if warning:
+        console.print(f"[yellow]⚠[/] {warning}")
 
 
 async def cmd_alias_list(args: argparse.Namespace) -> None:
@@ -474,7 +507,7 @@ async def cmd_default(args: argparse.Namespace) -> None:
     from .live import run_live
     from .wizard import run_wizard
 
-    setup = await run_wizard(args.db)
+    setup = await run_wizard(args.db, force_setup=args.setup)
     await run_live(setup)
 
 
@@ -489,9 +522,16 @@ async def cmd_tui(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="uagents-trace",
-        description="Live agent message viewer. Run with no arguments for the interactive setup.",
+        description="Live agent message viewer. Run with no arguments for the live diagram -- "
+        "resumes your saved setup automatically, or runs the interactive setup the first time.",
     )
     parser.add_argument("--db", help="Path to the SQLite file (defaults to $UAGENTS_TRACE_DB or ./uagents_trace.db)")
+    parser.add_argument(
+        "--setup",
+        action="store_true",
+        help="Force the interactive setup wizard, even if a saved config exists "
+        "(default: a saved config resumes automatically, no prompt)",
+    )
     sub = parser.add_subparsers(dest="command", required=False)
 
     list_p = sub.add_parser("list", help="(Advanced) List recent traces as a table")
