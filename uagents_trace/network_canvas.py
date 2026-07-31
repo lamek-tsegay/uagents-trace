@@ -598,6 +598,209 @@ def build_peer_topology(
     return canvas.to_text()
 
 
+# --------------------------------------------------------------------------
+# Layered left-to-right overview: every participating agent as a box, depth
+# as the horizontal axis (see shape.build_overview_graph, which supplies the
+# deduplicated agent/edge lists this renders -- no layout logic lives there,
+# no graph-collapsing logic lives here).
+# --------------------------------------------------------------------------
+
+LAYERED_BOX_H = 3
+LAYERED_COL_GAP = 8  # horizontal room for connectors + an arrowhead between columns
+LAYERED_ROW_UNIT = LAYERED_BOX_H + 2  # box + 1 status/latency row + 1 blank separator row
+LAYERED_RETURN_LANE_GAP = 2  # rows between the bottom of the main grid and the first backward-edge lane
+
+
+@dataclass
+class LayeredLayout:
+    """Geometry for one layered-overview render -- computed once and shared
+    by the text renderer and the click hit-region builder, same pattern as
+    `HubLayout`/`PeerLayout`.
+    """
+
+    total_w: int
+    total_h: int
+    boxes: dict[str, BoxRegion]  # agent -> box region
+    columns: list[list[str]]  # agents per column, left to right, root first
+    return_lane_start: int  # first row backward edges route through
+
+
+def _compute_layered_layout(
+    nodes: list[Any],
+    display_names: dict[str, str],
+) -> LayeredLayout:
+    """Column = compacted rank of `node.depth` (so a gap in the depth
+    sequence -- e.g. no agent was first discovered at depth 8 -- doesn't
+    leave a blank column); row = encounter order within that column, which
+    is `build_overview_graph`'s own traversal order (root-to-leaf,
+    depth-first) -- close enough to "the order things happened" that
+    related agents (e.g. one lead's own workers) end up adjacent without
+    needing a separate crossing-minimization pass.
+    """
+    depths = sorted({n.depth for n in nodes})
+    col_index = {d: i for i, d in enumerate(depths)}
+    columns: list[list[str]] = [[] for _ in depths]
+    for n in nodes:
+        columns[col_index[n.depth]].append(n.agent)
+
+    col_widths = [
+        max((max(len(display_names[a]) + 2, BOX_MIN_WIDTH) for a in members), default=BOX_MIN_WIDTH) + 2
+        for members in columns
+    ]
+
+    col_x: list[int] = []
+    x = 0
+    for w in col_widths:
+        col_x.append(x)
+        x += w + LAYERED_COL_GAP
+    total_w = max(x - LAYERED_COL_GAP, 1)
+
+    max_rows = max((len(c) for c in columns), default=0)
+    total_col_h = max_rows * LAYERED_ROW_UNIT
+
+    boxes: dict[str, BoxRegion] = {}
+    for c, members in enumerate(columns):
+        y_offset = (total_col_h - len(members) * LAYERED_ROW_UNIT) // 2
+        for i, agent in enumerate(members):
+            y0 = y_offset + i * LAYERED_ROW_UNIT
+            x0 = col_x[c]
+            box_w = col_widths[c]
+            boxes[agent] = (x0, y0, x0 + box_w, y0 + LAYERED_BOX_H)
+
+    return_lane_start = total_col_h + LAYERED_RETURN_LANE_GAP
+    return LayeredLayout(
+        total_w=total_w,
+        total_h=return_lane_start,  # grown below, per backward edge that needs its own lane
+        boxes=boxes,
+        columns=columns,
+        return_lane_start=return_lane_start,
+    )
+
+
+def build_layered_hit_regions(nodes: list[Any], display_names: dict[str, str]) -> dict[str, BoxRegion]:
+    """agent -> box region, for the live TUI to hit-test a click against.
+    Mirrors `build_hub_hit_regions`; same caveat about needing the same
+    inputs as whatever `build_layered_topology` call it's paired with.
+    """
+    if not nodes:
+        return {}
+    return _compute_layered_layout(nodes, display_names).boxes
+
+
+def _latest_incoming_edge(edges: list[Any]) -> dict[str, Any]:
+    """dest agent -> its most recent incoming edge (last one in trace
+    order) -- the edge whose latency/state labels that agent's own box,
+    matching `OverviewNode`'s own "most recent occurrence wins the box's
+    state" rule (see `build_overview_graph`).
+    """
+    latest: dict[str, Any] = {}
+    for e in edges:
+        latest[e.dest] = e
+    return latest
+
+
+def build_layered_topology(
+    nodes: list[Any],
+    edges: list[Any],
+    display_names: dict[str, str],
+    *,
+    pulse: bool = False,
+    selected: str | None = None,
+) -> Text:
+    """Every participating agent as a box, left to right by causal depth,
+    connected by one line per logical call (`shape.build_overview_graph`
+    already merged request/response and deduplicated boxes -- this only
+    lays out and draws what it's given, never collapses or hides anything
+    further). A forward call (source shallower than dest) routes through a
+    shared per-source bus in the gap to its right, same drawing technique
+    `build_hub_topology` uses, just horizontal instead of vertical. A
+    non-forward call -- a retry back to an agent that already has a box,
+    or the final reply all the way back to the external caller's own box
+    -- gets its own lane below the main grid instead of being squeezed
+    into the forward flow or silently dropped; still a real, visible line,
+    just drawn where it won't be mistaken for the primary left-to-right
+    path.
+    """
+    if not nodes:
+        canvas = Canvas(40, 3)
+        canvas.text_over(2, 1, "Waiting for messages…", MUTED)
+        return canvas.to_text()
+
+    layout = _compute_layered_layout(nodes, display_names)
+    node_by_agent = {n.agent: n for n in nodes}
+    incoming = _latest_incoming_edge(edges)
+
+    forward_edges = [e for e in edges if e.forward and e.source in layout.boxes and e.dest in layout.boxes]
+    backward_edges = [e for e in edges if not e.forward and e.source in layout.boxes and e.dest in layout.boxes]
+
+    total_h = layout.return_lane_start + len(backward_edges) + 1
+    canvas = Canvas(layout.total_w, total_h)
+
+    # Forward edges: one shared bus per source, in the gap to its right --
+    # mirrors _draw_hub_arrows, just horizontal (bus is a vline, drops are
+    # hlines) instead of vertical.
+    by_source: dict[str, list[Any]] = {}
+    for e in forward_edges:
+        by_source.setdefault(e.source, []).append(e)
+
+    for source, out_edges in by_source.items():
+        sx0, sy0, sx1, sy1 = layout.boxes[source]
+        s_cy = (sy0 + sy1) // 2
+        bus_x = sx1 + LAYERED_COL_GAP // 2
+        dest_cys = [((layout.boxes[e.dest][1] + layout.boxes[e.dest][3]) // 2) for e in out_edges]
+
+        bus_style = _stem_style([{"state": e.state} for e in out_edges], pulse)
+        canvas.hline(sx1, bus_x, s_cy, bus_style)
+        if len(set(dest_cys)) > 1 or any(cy != s_cy for cy in dest_cys):
+            canvas.vline(bus_x, min(dest_cys + [s_cy]), max(dest_cys + [s_cy]), bus_style)
+
+        for e, d_cy in zip(out_edges, dest_cys):
+            dx0 = layout.boxes[e.dest][0]
+            edge_style = _line_style(e.state, pulse)
+            canvas.hline(bus_x, dx0 - 1, d_cy, edge_style)
+            canvas.text_over(dx0 - 1, d_cy, "▶", edge_style)
+
+    # Backward edges: each gets its own lane below the grid, dropping down
+    # from the source box's bottom and back up into the dest box's bottom
+    # -- never overlapping the forward flow above, never hidden.
+    for i, e in enumerate(backward_edges):
+        lane_y = layout.return_lane_start + i
+        style = _line_style(e.state, pulse)
+        sx0, sy0, sx1, sy1 = layout.boxes[e.source]
+        dx0, dy0, dx1, dy1 = layout.boxes[e.dest]
+        s_bottom_x = (sx0 + sx1) // 2
+        d_bottom_x = (dx0 + dx1) // 2
+        canvas.vline(s_bottom_x, sy1, lane_y, style)
+        canvas.hline(min(s_bottom_x, d_bottom_x), max(s_bottom_x, d_bottom_x), lane_y, style)
+        canvas.vline(d_bottom_x, dy1, lane_y, style)
+        canvas.text_over(d_bottom_x, dy1, "▲" if lane_y > dy1 else "▼", style)
+
+    # Boxes drawn last so they sit on top of any connector that happens to
+    # pass behind their footprint (shouldn't normally happen, but a box's
+    # border reads as broken if a line punches through it).
+    for agent, (x0, y0, x1, y1) in layout.boxes.items():
+        node = node_by_agent[agent]
+        is_selected = selected == agent
+        box_style = _box_style(node.state)
+        if is_selected:
+            box_style = _ensure_bold(box_style)
+        canvas.draw_box(x0, y0, display_names[agent], style=box_style, double=is_selected)
+
+        glyph, glyph_style = _status_glyph(node.state, pulse)
+        cx = (x0 + x1) // 2
+        edge = incoming.get(agent)
+        if node.state == "failed" and node.reason:
+            label = f"{glyph} {node.reason}"
+        elif edge is not None and edge.latency_ms is not None:
+            label = f"{glyph} {format_ms(edge.latency_ms)}"
+        else:
+            label = glyph
+        label = label if len(label) <= x1 - x0 else label[: max(x1 - x0 - 1, 1)] + "…"
+        canvas.text_over(max(cx - len(label) // 2, x0), y1, label, glyph_style)
+
+    return canvas.to_text()
+
+
 # Back-compat aliases
 build_hub_network = build_hub_topology
 build_peer_network = build_peer_topology
