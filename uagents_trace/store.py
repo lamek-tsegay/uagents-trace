@@ -8,7 +8,7 @@ server (reader) can use the same file concurrently from separate processes.
 
 import os
 import time
-from typing import Any
+from typing import Any, Optional
 
 import aiosqlite
 
@@ -32,9 +32,10 @@ CREATE INDEX IF NOT EXISTS idx_spans_trace_id ON spans(trace_id);
 CREATE INDEX IF NOT EXISTS idx_spans_enqueued_at ON spans(enqueued_at);
 
 CREATE TABLE IF NOT EXISTS aliases (
-    name TEXT PRIMARY KEY,
-    address TEXT NOT NULL UNIQUE
+    address TEXT PRIMARY KEY,
+    name TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_aliases_name ON aliases(name);
 """
 
 # Columns added after the initial release. `CREATE TABLE IF NOT EXISTS`
@@ -62,12 +63,34 @@ SPAN_COLUMNS_V3 = {
     "direction": "TEXT",
 }
 
+# parent_span_id: id of the receive span whose handler was executing (per
+# the `recorder._current_span` contextvar) when this span was written --
+# only ever set on "send" spans (see `recorder.traced_send`), pointing back
+# to the *sender's own* receive span that caused the send. NULL means
+# "unknown" (no handler context was active -- a timer, a detached
+# background task, or the trace's true entry point), same as the existing
+# registered=True/False/None philosophy: not something to guess at.
+SPAN_COLUMNS_V4 = {
+    "parent_span_id": "TEXT",
+}
+
 WATCH_CONFIG_SCHEMA = """
 CREATE TABLE IF NOT EXISTS watch_config (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
 """
+
+# Every traced agent *process* is its own writer against the same file (not
+# just the one recorder + one server the module docstring calls out), so
+# concurrent writes -- especially several processes' first message all
+# racing to run `init_db`'s migrations at once -- are the normal case, not
+# an edge case. sqlite3's default connection timeout (5s, what a bare
+# `aiosqlite.connect(db_path)` with no `timeout=` kwarg gets) is tight
+# enough for that to occasionally lose and raise "database is locked"
+# outright instead of just waiting a little longer; every connection in
+# this module sets this explicitly instead of trusting the driver default.
+DB_TIMEOUT_SECONDS = 30
 
 
 def default_db_path() -> str:
@@ -78,31 +101,65 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
+async def _migrate_aliases_table(db: aiosqlite.Connection) -> None:
+    """Flip `aliases`' primary key from `name` to `address` on databases
+    created before this change. An agent's address is its stable identity
+    (a re-aliased address should replace that address's old name, not spawn
+    a second row) -- see `set_alias`'s docstring. `ALTER TABLE` can't change
+    a primary key in SQLite, so this rebuilds the table when needed; a
+    freshly created table (via `SCHEMA` above) is already correct and
+    `PRAGMA table_info` reports its pk column as `address` immediately, so
+    this is a one-time no-op after the first migrated run.
+    """
+    cursor = await db.execute("PRAGMA table_info(aliases)")
+    columns = await cursor.fetchall()
+    if not columns:
+        return
+    pk_column = next((col[1] for col in columns if col[5] == 1), None)
+    if pk_column == "address":
+        return
+    await db.executescript(
+        """
+        ALTER TABLE aliases RENAME TO aliases_old;
+        CREATE TABLE aliases (
+            address TEXT PRIMARY KEY,
+            name TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_aliases_name ON aliases(name);
+        INSERT INTO aliases (address, name) SELECT address, name FROM aliases_old;
+        DROP TABLE aliases_old;
+        """
+    )
+
+
 async def init_db(db_path: str) -> None:
-    async with aiosqlite.connect(db_path) as db:
+    async with aiosqlite.connect(db_path, timeout=DB_TIMEOUT_SECONDS) as db:
         await db.execute("PRAGMA journal_mode=WAL;")
         await db.executescript(SCHEMA)
         await db.commit()
 
         cursor = await db.execute("PRAGMA table_info(spans)")
         existing_columns = {row[1] for row in await cursor.fetchall()}
-        for column, sql_type in {**SPAN_COLUMNS_V2, **SPAN_COLUMNS_V3}.items():
+        for column, sql_type in {**SPAN_COLUMNS_V2, **SPAN_COLUMNS_V3, **SPAN_COLUMNS_V4}.items():
             if column not in existing_columns:
                 await db.execute(f"ALTER TABLE spans ADD COLUMN {column} {sql_type}")
+        await _migrate_aliases_table(db)
+        await db.commit()
         await db.executescript(WATCH_CONFIG_SCHEMA)
         await db.commit()
 
 
 async def insert_span(db_path: str, span: dict[str, Any]) -> None:
-    async with aiosqlite.connect(db_path) as db:
+    async with aiosqlite.connect(db_path, timeout=DB_TIMEOUT_SECONDS) as db:
         await db.execute(
             """
             INSERT INTO spans (
                 id, trace_id, source_agent, dest_agent, protocol,
                 payload_type, payload_size, enqueued_at, acked_at, state,
                 source_registered, dest_registered, error,
-                session_id, kind, detail, payload_summary, direction
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                session_id, kind, detail, payload_summary, direction,
+                parent_span_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 span["id"],
@@ -123,6 +180,7 @@ async def insert_span(db_path: str, span: dict[str, Any]) -> None:
                 span.get("detail"),
                 span.get("payload_summary"),
                 span.get("direction"),
+                span.get("parent_span_id"),
             ),
         )
         await db.commit()
@@ -133,7 +191,7 @@ async def update_span(db_path: str, span_id: str, **fields: Any) -> None:
         return
     columns = ", ".join(f"{key} = ?" for key in fields)
     values = list(fields.values()) + [span_id]
-    async with aiosqlite.connect(db_path) as db:
+    async with aiosqlite.connect(db_path, timeout=DB_TIMEOUT_SECONDS) as db:
         await db.execute(f"UPDATE spans SET {columns} WHERE id = ?", values)
         await db.commit()
 
@@ -155,7 +213,7 @@ async def list_traces(db_path: str) -> list[dict[str, Any]]:
     payload type list both come out as ordered, deduplicated lists -- this
     tool's write volume is low enough that a full scan per request is fine.
     """
-    async with aiosqlite.connect(db_path) as db:
+    async with aiosqlite.connect(db_path, timeout=DB_TIMEOUT_SECONDS) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT trace_id, source_agent, dest_agent, payload_type, state, enqueued_at, session_id "
@@ -193,7 +251,7 @@ async def list_traces(db_path: str) -> list[dict[str, Any]]:
 
 
 async def get_trace_spans(db_path: str, trace_id: str) -> list[dict[str, Any]]:
-    async with aiosqlite.connect(db_path) as db:
+    async with aiosqlite.connect(db_path, timeout=DB_TIMEOUT_SECONDS) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT * FROM spans WHERE trace_id = ? ORDER BY enqueued_at ASC",
@@ -209,7 +267,7 @@ async def get_spans_by_session(db_path: str, session_id: str) -> list[dict[str, 
     (both come from ctx.session) but is kept as its own filter since that
     may not always hold as more instrumentation points are added.
     """
-    async with aiosqlite.connect(db_path) as db:
+    async with aiosqlite.connect(db_path, timeout=DB_TIMEOUT_SECONDS) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT * FROM spans WHERE session_id = ? ORDER BY enqueued_at ASC",
@@ -219,30 +277,44 @@ async def get_spans_by_session(db_path: str, session_id: str) -> list[dict[str, 
         return [_row_to_span(row) for row in rows]
 
 
-async def set_alias(db_path: str, name: str, address: str) -> None:
-    """Upsert `name` -> `address`. `address` is unique, so re-aliasing an
-    address that already has a different name replaces that old entry
-    instead of erroring -- one name per address, last write wins.
+async def set_alias(db_path: str, name: str, address: str) -> Optional[str]:
+    """Upsert `address` -> `name`. `address` is the primary key -- an
+    agent's address is its stable identity, so re-aliasing an address that
+    already has a different name replaces that address's own old name
+    (rename), it never touches any *other* address's row.
+
+    Returns a warning string if `name` is already in use by a *different*
+    address (that other address's alias is left alone, not silently
+    dropped, so both addresses end up sharing the display name until a
+    caller resolves the collision) -- None otherwise.
     """
-    async with aiosqlite.connect(db_path) as db:
-        await db.execute("DELETE FROM aliases WHERE address = ? AND name != ?", (address, name))
+    async with aiosqlite.connect(db_path, timeout=DB_TIMEOUT_SECONDS) as db:
+        db.row_factory = aiosqlite.Row
+        cursor = await db.execute("SELECT address FROM aliases WHERE name = ? AND address != ?", (name, address))
+        collision = await cursor.fetchone()
+        warning = (
+            f"'{name}' is already the display name for {collision['address']} -- both addresses now show as '{name}'."
+            if collision
+            else None
+        )
         await db.execute(
-            "INSERT INTO aliases (name, address) VALUES (?, ?) "
-            "ON CONFLICT(name) DO UPDATE SET address = excluded.address",
-            (name, address),
+            "INSERT INTO aliases (address, name) VALUES (?, ?) "
+            "ON CONFLICT(address) DO UPDATE SET name = excluded.name",
+            (address, name),
         )
         await db.commit()
+    return warning
 
 
 async def remove_alias(db_path: str, name: str) -> bool:
-    async with aiosqlite.connect(db_path) as db:
+    async with aiosqlite.connect(db_path, timeout=DB_TIMEOUT_SECONDS) as db:
         cursor = await db.execute("DELETE FROM aliases WHERE name = ?", (name,))
         await db.commit()
         return cursor.rowcount > 0
 
 
 async def list_aliases(db_path: str) -> list[dict[str, Any]]:
-    async with aiosqlite.connect(db_path) as db:
+    async with aiosqlite.connect(db_path, timeout=DB_TIMEOUT_SECONDS) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute("SELECT name, address FROM aliases ORDER BY name")
         rows = await cursor.fetchall()
@@ -269,7 +341,7 @@ async def get_spans_since(
 
     Includes acked_at updates so pending spans that later deliver are picked up.
     """
-    async with aiosqlite.connect(db_path) as db:
+    async with aiosqlite.connect(db_path, timeout=DB_TIMEOUT_SECONDS) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             """
@@ -292,7 +364,7 @@ async def get_recent_spans(
     addresses: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Most recent spans, oldest first within the window."""
-    async with aiosqlite.connect(db_path) as db:
+    async with aiosqlite.connect(db_path, timeout=DB_TIMEOUT_SECONDS) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
             "SELECT * FROM spans ORDER BY enqueued_at DESC LIMIT ?",
@@ -314,7 +386,7 @@ async def save_watch_config(
 ) -> None:
     import json
 
-    async with aiosqlite.connect(db_path) as db:
+    async with aiosqlite.connect(db_path, timeout=DB_TIMEOUT_SECONDS) as db:
         await db.executescript(WATCH_CONFIG_SCHEMA)
         await db.execute(
             "INSERT INTO watch_config (key, value) VALUES (?, ?) "
@@ -344,7 +416,7 @@ async def save_watch_config(
 async def load_watch_config(db_path: str) -> dict[str, Any] | None:
     import json
 
-    async with aiosqlite.connect(db_path) as db:
+    async with aiosqlite.connect(db_path, timeout=DB_TIMEOUT_SECONDS) as db:
         await db.executescript(WATCH_CONFIG_SCHEMA)
         db.row_factory = aiosqlite.Row
         cursor = await db.execute("SELECT key, value FROM watch_config")
@@ -358,5 +430,5 @@ async def load_watch_config(db_path: str) -> dict[str, Any] | None:
         "addresses": json.loads(data["addresses"]),
         "filter_only": data.get("filter_only", "true") == "true",
         "orchestrator": data.get("orchestrator"),
-        "view_mode": data.get("view_mode", "linear"),
+        "view_mode": data.get("view_mode", "overview"),
     }
